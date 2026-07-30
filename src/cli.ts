@@ -8,18 +8,26 @@
  * They are the same data, read in two directions.
  */
 
-import { findSupplier, householdServings, mustItem, recipeFor, resolveItem, validate } from './domain/db.js';
+import {
+  conversionContext,
+  findSupplier,
+  householdServings,
+  mustItem,
+  recipeFor,
+  resolveItem,
+  validate,
+} from './domain/db.js';
 import { addDays, formatDate, parseDate, today, type IsoDate } from './domain/date.js';
 import { MiseError } from './domain/errors.js';
 import { nextId } from './domain/ids.js';
-import { parseQuantity, parseUom, type UomCode } from './domain/units.js';
+import { convert, parseQuantity, parseUom, type UomCode } from './domain/units.js';
 import type { Database, ItemId, MealSlot } from './domain/types.js';
 import { seedDatabase } from './data/seed.js';
 import { aggregate, explode, quantityForServings, servingsForQuantity } from './engine/explode.js';
 import { findCycles, lowLevelCodes, recipeDepth, whereUsed } from './engine/graph.js';
 import {
+  availableOn,
   expiring,
-  onHand,
   receive,
   stockReport,
   stockValue,
@@ -277,7 +285,7 @@ const commands: Record<string, Command> = {
           { header: 'Ingredient', get: (r) => r.item.name },
           { header: 'Quantity', get: (r) => f.qty(r.qty, r.uom), align: 'right' },
           { header: 'Cost', get: (r) => f.money((costs.get(r.itemId) ?? 0) * r.qty, ctx.db.settings.currency), align: 'right' },
-          { header: 'In stock', get: (r) => f.qty(onHand(ctx.db, r.itemId), r.uom), align: 'right' },
+          { header: 'In stock', get: (r) => f.qty(availableOn(ctx.db, r.itemId, today()), r.uom), align: 'right' },
           {
             header: 'Used in',
             get: (r) =>
@@ -431,7 +439,7 @@ const commands: Record<string, Command> = {
   // ---- pantry ------------------------------------------------------------
 
   stock: {
-    usage: 'mise stock [--expiring N] [--low]',
+    usage: 'mise stock [--expiring N] [--low] | stock add <item> <qty> [uom] [--expires DATE] [--cost TOTAL]',
     summary: 'What is in the house, by lot, with expiry.',
     group: 'pantry',
     run: (ctx) => {
@@ -442,11 +450,18 @@ const commands: Record<string, Command> = {
         const uom = rawUom ? parseUom(rawUom) : item.stockUom;
         const expires = stringFlag(ctx.args, 'expires');
         const cost = ctx.args.flags['cost'];
+        const amount = parseQuantity(rawQty);
+        // `--cost` is what the whole lot cost. Lots store cost per *stock*
+        // unit, so divide by the converted quantity, not the entered one:
+        // "1 kg for £2" is £0.002 a gram, not £2 a gram.
+        const inStockUnits = convert(amount, uom, item.stockUom, conversionContext(item));
         const lot = receive(ctx.db, item.id, {
-          qty: parseQuantity(rawQty),
+          qty: amount,
           uom,
           ...(expires ? { expiresOn: parseDate(expires) } : {}),
-          ...(typeof cost === 'string' ? { unitCost: Number(cost) / parseQuantity(rawQty) } : {}),
+          ...(typeof cost === 'string' && inStockUnits > 0
+            ? { unitCost: Number(cost) / inStockUnits }
+            : {}),
         });
         ctx.dirty = true;
         out(`${f.style('✓', 'green')} ${lot.id}: ${f.qty(lot.qty, item.stockUom)} of ${item.name}` +
@@ -482,6 +497,14 @@ const commands: Record<string, Command> = {
           { header: 'Item', get: (l) => (l.belowSafety ? f.style(l.item.name, 'yellow') : l.item.name) },
           { header: 'Category', get: (l) => f.style(l.item.category, 'grey') },
           { header: 'On hand', get: (l) => f.qty(l.qty, l.uom), align: 'right' },
+          {
+            header: 'Usable',
+            get: (l) =>
+              l.usable < l.qty - 1e-9
+                ? f.style(f.qty(l.usable, l.uom), 'yellow')
+                : f.style('all', 'grey'),
+            align: 'right',
+          },
           { header: 'Lots', get: (l) => String(l.lots), align: 'right' },
           { header: 'Value', get: (l) => f.money(l.value, ctx.db.settings.currency), align: 'right' },
           { header: 'Next expiry', get: (l) => (l.nextExpiry ? formatDate(l.nextExpiry) : f.style('—', 'grey')) },
@@ -672,7 +695,8 @@ const commands: Record<string, Command> = {
           'grey',
         ),
       );
-      for (const problem of result.problems) out(f.style(`  ! ${problem}`, 'red'));
+      for (const problem of result.problems) out(f.style(`  ✗ ${problem}`, 'red'));
+      for (const conflict of result.conflicts) out(f.style(`  ⚠ ${conflict}`, 'yellow'));
 
       if (boolFlag(ctx.args, 'commit')) {
         const orders = commitProduction(ctx.db, result);
@@ -705,6 +729,7 @@ const commands: Record<string, Command> = {
             { header: 'Buy', get: (l) => f.style(`${f.num(l.packs)} × ${l.packLabel}`, 'bold'), align: 'right' },
             { header: 'Cost', get: (l) => f.money(l.lineCost, currency), align: 'right' },
             { header: 'Spare', get: (l) => (l.leftover > 0.01 ? f.style(f.qty(l.leftover, l.uom), 'grey') : ''), align: 'right' },
+            { header: 'When', get: (l) => (l.late ? f.style(`${formatDate(l.orderBy)} — late`, 'red') : formatDate(l.orderBy)) },
             { header: 'For', get: (l) => f.style(l.forDishes.join(', '), 'grey') },
           ]),
         );
@@ -713,7 +738,12 @@ const commands: Record<string, Command> = {
       out();
       out(`  ${f.style('Total', 'bold')} ${f.style(f.money(list.total, currency), 'bold', 'green')}`);
       for (const line of list.unresolved) {
-        out(f.style(`  ! ${line.name}: ${line.problem}`, 'yellow'));
+        out(f.style(`  ✗ ${line.name}: ${line.problem}`, 'red'));
+      }
+      if (mrp.conflicts.length > 0) {
+        out();
+        out(f.style('  Shop opening days make these tight:', 'yellow'));
+        for (const conflict of mrp.conflicts) out(f.style(`    ⚠ ${conflict}`, 'yellow'));
       }
 
       if (boolFlag(ctx.args, 'commit')) {
@@ -980,7 +1010,7 @@ const commands: Record<string, Command> = {
           },
           { header: 'Uom', get: (i) => i.stockUom },
           { header: 'LLC', get: (i) => String(codes.get(i.id) ?? 0), align: 'right' },
-          { header: 'On hand', get: (i) => f.qty(onHand(ctx.db, i.id), i.stockUom), align: 'right' },
+          { header: 'On hand', get: (i) => f.qty(availableOn(ctx.db, i.id, today()), i.stockUom), align: 'right' },
           {
             header: 'Unit cost',
             get: (i) => {

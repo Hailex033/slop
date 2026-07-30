@@ -194,13 +194,81 @@ test('replacing an item in place is seen by the next planning run', () => {
   assert.ok(close(cheese.net, 950), `200 g demand + 750 g buffer, got ${cheese.net}`);
 });
 
+test('safety stock is rebuilt even with nothing planned', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, safetyStock: 300 } : item,
+  );
+  // No meal plan, no orders, empty pantry: the buffer alone is the demand.
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const cheese = result.purchases.find((line) => line.itemId === 'cheese');
+
+  assert.ok(cheese, 'a depleted buffer is a requirement in its own right');
+  assert.ok(close(cheese.qty, 300));
+
+  receive(database, 'cheese', { qty: 300, on: '2026-07-01' });
+  const topped = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(!topped.purchases.some((line) => line.itemId === 'cheese'), 'and stops once it is full');
+});
+
+test('expired stock is not counted as supply', () => {
+  const database = nestedDb();
+  planned(database, 'cheese', 200, '2026-07-10');
+  receive(database, 'cheese', { qty: 500, on: '2026-07-01', expiresOn: '2026-07-05' });
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 14 });
+  const cheese = result.lines.find((line) => line.itemId === 'cheese')!;
+
+  assert.equal(cheese.onHand, 0, 'the cheese is off by the time it is wanted');
+  assert.ok(close(cheese.net, 200));
+});
+
+test('stock still good on the day it is needed does count', () => {
+  const database = nestedDb();
+  planned(database, 'cheese', 200, '2026-07-04');
+  receive(database, 'cheese', { qty: 500, on: '2026-07-01', expiresOn: '2026-07-05' });
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 14 });
+  assert.equal(result.lines.find((line) => line.itemId === 'cheese')!.action, 'covered');
+});
+
+test('purchases land on a day the supplier is actually open', () => {
+  const database = nestedDb();
+  database.suppliers = [{ id: 'shop', name: 'Saturday market', leadTimeDays: 0, deliveryDays: [6] }];
+  // 2026-07-15 is a Wednesday; the Saturday before it is the 11th.
+  planned(database, 'cheese', 200, '2026-07-15');
+
+  const result = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
+  const cheese = result.purchases.find((line) => line.itemId === 'cheese')!;
+
+  assert.equal(cheese.orderBy, '2026-07-11');
+  assert.equal(cheese.late, false);
+  assert.deepEqual(result.conflicts, []);
+});
+
+test('an unreachable shopping day is reported as a conflict, not hidden', () => {
+  const database = nestedDb();
+  database.suppliers = [{ id: 'shop', name: 'Saturday market', leadTimeDays: 0, deliveryDays: [6] }];
+  // Needed Thursday, with no Saturday in between.
+  planned(database, 'cheese', 200, '2026-07-09');
+
+  const result = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
+  const cheese = result.purchases.find((line) => line.itemId === 'cheese')!;
+
+  assert.equal(cheese.late, true);
+  assert.equal(cheese.orderBy, '2026-07-11', 'the next actual market day');
+  assert.equal(result.conflicts.length, 1);
+  assert.match(result.conflicts[0]!, /cannot supply it in time/);
+  assert.deepEqual(result.problems, [], 'a shop being shut is not a data error');
+});
+
 test('the example week produces both a shopping list and a cook list', () => {
   const database = seedDatabase({ from: '2026-07-01' });
   const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
 
   assert.ok(result.purchases.length > 0);
   assert.ok(result.production.length > 0);
-  assert.deepEqual(result.problems, []);
+  assert.deepEqual(result.problems, [], 'every item is sourceable');
 
   // Butter is genuinely reachable five ways in that dataset; still one line.
   assert.equal(result.lines.filter((line) => line.itemId === 'butter').length, 1);

@@ -16,7 +16,7 @@ import { convert } from '../domain/units.js';
 import { nextId } from '../domain/ids.js';
 import type { Database, ItemId, ProductionOrder } from '../domain/types.js';
 import { quantityForServings, servingsForQuantity } from './explode.js';
-import { onHand, issue, receive } from './inventory.js';
+import { availableOn, issue, receive } from './inventory.js';
 import type { MrpResult, PlannedProduction } from './mrp.js';
 import { recipeMinutes, rollupTime } from './rollup.js';
 
@@ -118,11 +118,17 @@ export interface Shortage {
   readonly uom: string;
 }
 
-/** Free stock per item, as a working balance that a walk can draw down. */
-function stockBalances(db: Database): Map<ItemId, number> {
+/**
+ * Free stock per item, as a working balance that a walk can draw down.
+ * Only counts lots still fit to use, so a fridge full of past-date yoghurt
+ * does not make a dish look possible.
+ */
+function stockBalances(db: Database, asOf: IsoDate): Map<ItemId, number> {
   const balances = new Map<ItemId, number>();
   for (const lot of db.lots) {
-    if (lot.qty > 0) balances.set(lot.itemId, (balances.get(lot.itemId) ?? 0) + lot.qty);
+    if (lot.qty <= 0) continue;
+    if (lot.expiresOn && lot.expiresOn < asOf) continue;
+    balances.set(lot.itemId, (balances.get(lot.itemId) ?? 0) + lot.qty);
   }
   return balances;
 }
@@ -182,10 +188,15 @@ function netRequirements(
 }
 
 /** What you would still have to buy to make `servings` of something. */
-function shortfallsFor(db: Database, itemId: ItemId, servings: number): Map<ItemId, number> {
+function shortfallsFor(
+  db: Database,
+  itemId: ItemId,
+  servings: number,
+  asOf: IsoDate,
+): Map<ItemId, number> {
   const shortfalls = new Map<ItemId, number>();
   const { qty } = quantityForServings(db, itemId, servings);
-  netRequirements(db, itemId, qty, stockBalances(db), shortfalls);
+  netRequirements(db, itemId, qty, stockBalances(db, asOf), shortfalls);
   return shortfalls;
 }
 
@@ -196,8 +207,8 @@ function shortfallsFor(db: Database, itemId: ItemId, servings: number): Map<Item
  * rest grow — so "needs nothing" is monotone and bisection is exact to the
  * tolerance it runs to.
  */
-function maxFeasibleServings(db: Database, itemId: ItemId, probe: number): number {
-  const ok = (servings: number): boolean => shortfallsFor(db, itemId, servings).size === 0;
+function maxFeasibleServings(db: Database, itemId: ItemId, probe: number, asOf: IsoDate): number {
+  const ok = (servings: number): boolean => shortfallsFor(db, itemId, servings, asOf).size === 0;
 
   let low = 0;
   let high = probe;
@@ -225,12 +236,17 @@ function maxFeasibleServings(db: Database, itemId: ItemId, probe: number): numbe
  * sub-recipes you already have as the finished thing rather than insisting on
  * their raw ingredients.
  */
-export function feasibility(db: Database, itemId: ItemId, targetServings?: number): Feasibility {
+export function feasibility(
+  db: Database,
+  itemId: ItemId,
+  targetServings?: number,
+  asOf: IsoDate = today(),
+): Feasibility {
   const item = mustItem(db, itemId);
   const recipe = recipeFor(db, itemId);
   const probe = targetServings ?? recipe?.servings ?? 1;
 
-  const shortfalls = shortfallsFor(db, itemId, probe);
+  const shortfalls = shortfallsFor(db, itemId, probe, asOf);
   // The same walk against an empty pantry gives the denominator for coverage:
   // everything this dish needs, whether or not it happens to be in.
   const everything = new Map<ItemId, number>();
@@ -246,7 +262,7 @@ export function feasibility(db: Database, itemId: ItemId, targetServings?: numbe
   return {
     itemId,
     name: item.name,
-    servings: maxFeasibleServings(db, itemId, probe),
+    servings: maxFeasibleServings(db, itemId, probe, asOf),
     coverage: everything.size === 0 ? 1 : 1 - missing.length / everything.size,
     missing: missing.sort((a, b) => b.short - a.short),
     criticalPathMin: time.criticalPathMin,
@@ -254,19 +270,19 @@ export function feasibility(db: Database, itemId: ItemId, targetServings?: numbe
 }
 
 /** Rank everything you could plausibly cook tonight. */
-export function cookableNow(db: Database, minServings = 1): Feasibility[] {
+export function cookableNow(db: Database, minServings = 1, asOf: IsoDate = today()): Feasibility[] {
   return db.items
     .filter((item) => isMade(item) && isStocked(item) && recipeFor(db, item.id))
-    .map((item) => feasibility(db, item.id))
+    .map((item) => feasibility(db, item.id, undefined, asOf))
     .filter((result) => result.servings >= minServings)
     .sort((a, b) => b.servings - a.servings || a.criticalPathMin - b.criticalPathMin);
 }
 
 /** The near-misses: dishes one or two ingredients away from being possible. */
-export function almostCookable(db: Database, maxMissing = 2): Feasibility[] {
+export function almostCookable(db: Database, maxMissing = 2, asOf: IsoDate = today()): Feasibility[] {
   return db.items
     .filter((item) => isMade(item) && isStocked(item) && recipeFor(db, item.id))
-    .map((item) => feasibility(db, item.id))
+    .map((item) => feasibility(db, item.id, undefined, asOf))
     .filter((result) => result.servings < 1 && result.missing.length > 0 && result.missing.length <= maxMissing)
     .sort((a, b) => a.missing.length - b.missing.length || b.coverage - a.coverage);
 }
@@ -377,7 +393,7 @@ export function produce(
     }
 
     let madeToOrder = false;
-    const available = onHand(db, child.id);
+    const available = availableOn(db, child.id, on);
     if (available + 1e-9 < need && isMade(child) && cascade) {
       const gap = need - available;
       const inner = produce(db, child.id, gap, { ...options, on, ref });
@@ -459,7 +475,7 @@ export function serve(
 ): ProductionResult {
   const on = options.on ?? today();
   const { qty } = quantityForServings(db, itemId, servings);
-  const available = onHand(db, itemId);
+  const available = availableOn(db, itemId, on);
 
   let result: ProductionResult;
   if (available + 1e-9 >= qty) {

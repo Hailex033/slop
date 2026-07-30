@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ShortageError } from '../src/domain/errors.js';
-import { expiring, fefo, issue, onHand, onOrder, receive, stockValue, sweepExpired } from '../src/engine/inventory.js';
+import {
+  adjust,
+  availableOn,
+  expiring,
+  fefo,
+  issue,
+  onHand,
+  onOrder,
+  receive,
+  stockValue,
+  sweepExpired,
+} from '../src/engine/inventory.js';
 import { close, db, purchased } from './helpers.js';
 
 function pantry() {
@@ -105,4 +116,62 @@ test('open purchase orders count as supply, received ones do not', () => {
 
   database.purchaseOrders[0]!.status = 'received';
   assert.equal(onOrder(database, 'flour', '2026-07-05'), 0);
+});
+
+test('expired lots are physically present but not available', () => {
+  const database = pantry();
+  receive(database, 'milk', { qty: 500, on: '2026-06-01', expiresOn: '2026-06-10' });
+  receive(database, 'milk', { qty: 300, on: '2026-06-01', expiresOn: '2026-08-01' });
+
+  assert.equal(onHand(database, 'milk'), 800, 'both cartons are in the fridge');
+  assert.equal(availableOn(database, 'milk', '2026-07-01'), 300, 'only one is drinkable');
+  assert.equal(availableOn(database, 'milk', '2026-06-05'), 800);
+  assert.equal(availableOn(database, 'milk', '2026-06-10'), 800, 'good through its date');
+});
+
+test('issuing skips lots that have gone off by the issue date', () => {
+  const database = pantry();
+  receive(database, 'milk', { qty: 500, on: '2026-06-01', expiresOn: '2026-06-10', unitCost: 0.001 });
+  receive(database, 'milk', { qty: 300, on: '2026-06-01', expiresOn: '2026-08-01', unitCost: 0.002 });
+
+  const result = issue(database, 'milk', { qty: 400, on: '2026-07-01', allowNegative: true });
+
+  assert.equal(result.issued, 300, 'the off carton is not usable');
+  assert.equal(result.shortfall, 100);
+  assert.equal(onHand(database, 'milk'), 500, 'and is still sitting there to be binned');
+});
+
+test('a stocktake posts the movement exactly once', () => {
+  const database = pantry();
+  receive(database, 'flour', { qty: 10, on: '2026-07-01' });
+  database.ledger = [];
+
+  const txns = adjust(database, 'flour', 15, '2026-07-01');
+
+  assert.equal(onHand(database, 'flour'), 15);
+  assert.equal(database.ledger.length, 1, 'one movement, one ledger line');
+  assert.equal(database.ledger[0]!.type, 'adjust');
+  assert.equal(database.ledger.reduce((sum, txn) => sum + txn.qty, 0), 5);
+  assert.equal(txns.length, 1);
+});
+
+test('a stocktake downwards reconciles too, and can reach expired stock', () => {
+  const database = pantry();
+  receive(database, 'milk', { qty: 500, on: '2026-06-01', expiresOn: '2026-06-10' });
+  database.ledger = [];
+
+  adjust(database, 'milk', 200, '2026-07-01');
+
+  assert.equal(onHand(database, 'milk'), 200);
+  assert.equal(database.ledger.reduce((sum, txn) => sum + txn.qty, 0), -300);
+  assert.ok(database.ledger.every((txn) => txn.type === 'adjust'));
+});
+
+test('a stocktake that finds nothing wrong posts nothing', () => {
+  const database = pantry();
+  receive(database, 'flour', { qty: 10, on: '2026-07-01' });
+  database.ledger = [];
+
+  assert.deepEqual(adjust(database, 'flour', 10, '2026-07-01'), []);
+  assert.equal(database.ledger.length, 0);
 });

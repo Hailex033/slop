@@ -61,8 +61,13 @@ export function dateRange(from: IsoDate, days: number): IsoDate[] {
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
 
+/** 0 = Sunday, 6 = Saturday — the convention `Supplier.deliveryDays` uses. */
+export function weekdayIndex(date: IsoDate): number {
+  return new Date(toUtc(date)).getUTCDay();
+}
+
 export function weekdayOf(date: IsoDate): (typeof WEEKDAYS)[number] {
-  return WEEKDAYS[new Date(toUtc(date)).getUTCDay()]!;
+  return WEEKDAYS[weekdayIndex(date)]!;
 }
 
 /** "Thu 30 Jul" — compact and unambiguous for terminal tables. */

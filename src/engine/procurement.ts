@@ -37,6 +37,8 @@ export interface ShoppingLine {
   readonly supplierId?: SupplierId;
   readonly supplierName?: string;
   readonly orderBy: IsoDate;
+  /** True when the earliest possible trip lands after the food is needed. */
+  readonly late: boolean;
   /** What this is for, in plain language: "ragù, béchamel". */
   readonly forDishes: readonly string[];
   readonly problem?: string;
@@ -149,6 +151,7 @@ function toShoppingLine(
     ...(item.purchase ? { supplierId: item.purchase.supplierId } : {}),
     ...(supplier ? { supplierName: supplier.name } : {}),
     orderBy: planned.orderBy,
+    late: planned.late,
     forDishes,
     ...(problem ? { problem } : {}),
   };

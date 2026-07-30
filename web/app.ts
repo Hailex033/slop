@@ -15,7 +15,7 @@ import type { Database, Item, ItemId } from '../src/domain/types.js';
 import type { UomCode } from '../src/domain/units.js';
 import { aggregate, explode, quantityForServings, type BomNode } from '../src/engine/explode.js';
 import { lowLevelCodes, recipeDepth, whereUsed, type WhereUsedNode } from '../src/engine/graph.js';
-import { expiring, onHand, stockReport, stockValue } from '../src/engine/inventory.js';
+import { availableOn, expiring, stockReport, stockValue } from '../src/engine/inventory.js';
 import { runMrp } from '../src/engine/mrp.js';
 import { bySupplier, shoppingList } from '../src/engine/procurement.js';
 import { almostCookable, cook, cookableNow, prepSchedule } from '../src/engine/production.js';
@@ -330,7 +330,7 @@ function viewRecipes(): HTMLElement[] {
         { head: 'Reached via', cell: (r) => el('span', { class: 'dim' }, [...r.usedIn].map((id) => mustItem(db, id).name).sort().join(', ')) },
         { head: 'Cost', cell: (r) => cash((costs.get(r.itemId) ?? 0) * r.qty), num: true },
         { head: 'In stock', cell: (r) => {
-          const have = onHand(db, r.itemId);
+          const have = availableOn(db, r.itemId, today());
           return have >= r.qty ? badge('yes', 'ok') : el('span', { class: 'dim' }, qty(have, r.uom));
         } },
       ])),
@@ -472,7 +472,9 @@ function viewMrp(): HTMLElement[] {
             : l.action === 'phantom' ? badge('pass through', 'phantom')
             : badge('covered', 'ok') },
       ])),
-    ...result.problems.map((problem) => el('p', { class: 'error' }, `! ${problem}`)),
+    ...result.problems.map((problem) => el('p', { class: 'error' }, `✗ ${problem}`)),
+    ...result.conflicts.map((conflict) =>
+      el('p', { class: 'error', style: 'color:var(--warn)' }, `⚠ ${conflict}`)),
   ];
 }
 

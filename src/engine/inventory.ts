@@ -14,14 +14,38 @@ import { nextId } from '../domain/ids.js';
 import { convert, type UomCode } from '../domain/units.js';
 import type { Database, InventoryTxn, Item, ItemId, Lot, Storage, TxnType } from '../domain/types.js';
 
-/** Every lot of an item with stock remaining. */
+/** Every lot of an item with stock remaining, whether or not it is still good. */
 export function lotsOf(db: Database, itemId: ItemId): Lot[] {
   return db.lots.filter((lot) => lot.itemId === itemId && lot.qty > 0);
 }
 
-/** Total quantity on hand, in the item's stock unit. */
+/**
+ * Lots still fit to use on a given date. An undated lot never expires, and a
+ * lot is good through its expiry date itself.
+ */
+export function usableLots(db: Database, itemId: ItemId, asOf: IsoDate): Lot[] {
+  return lotsOf(db, itemId).filter((lot) => !lot.expiresOn || lot.expiresOn >= asOf);
+}
+
+/**
+ * Physical quantity in lots, in the item's stock unit.
+ *
+ * This is what is on the shelf, including anything past its date — the pantry
+ * report wants that, because the yoghurt is still physically there. Planning
+ * and issuing want `availableOn` instead.
+ */
 export function onHand(db: Database, itemId: ItemId): number {
   return lotsOf(db, itemId).reduce((sum, lot) => sum + lot.qty, 0);
+}
+
+/**
+ * Quantity you could actually cook with on `asOf`.
+ *
+ * Expired stock is not supply. Netting demand against it would quietly leave a
+ * dish short on the day, which is the one thing a pantry planner must not do.
+ */
+export function availableOn(db: Database, itemId: ItemId, asOf: IsoDate): number {
+  return usableLots(db, itemId, asOf).reduce((sum, lot) => sum + lot.qty, 0);
 }
 
 /**
@@ -50,13 +74,24 @@ export interface AllocationPlan {
   readonly cost: number;
 }
 
-/** Work out which lots would cover a requirement, without changing anything. */
-export function planAllocation(db: Database, itemId: ItemId, qty: number): AllocationPlan {
+/**
+ * Work out which lots would cover a requirement, without changing anything.
+ *
+ * `asOf` scopes it to stock that is still good on that date; pass `undefined`
+ * to reach expired lots too, which only a write-off or a stocktake should do.
+ */
+export function planAllocation(
+  db: Database,
+  itemId: ItemId,
+  qty: number,
+  asOf?: IsoDate,
+): AllocationPlan {
   const allocations: Allocation[] = [];
   let remaining = qty;
   let cost = 0;
 
-  for (const lot of fefo(lotsOf(db, itemId))) {
+  const candidates = asOf === undefined ? lotsOf(db, itemId) : usableLots(db, itemId, asOf);
+  for (const lot of fefo(candidates)) {
     if (remaining <= 1e-9) break;
     const take = Math.min(lot.qty, remaining);
     allocations.push({ lot, qty: take });
@@ -81,7 +116,7 @@ export interface ReceiveOptions {
   readonly unitCost?: number;
   readonly location?: Storage;
   readonly origin?: string;
-  readonly type?: Extract<TxnType, 'receipt' | 'produce'>;
+  readonly type?: Extract<TxnType, 'receipt' | 'produce' | 'adjust'>;
   readonly note?: string;
 }
 
@@ -126,9 +161,11 @@ export interface IssueOptions {
   readonly uom?: UomCode;
   readonly on?: IsoDate;
   readonly ref?: string;
-  readonly type?: Extract<TxnType, 'issue' | 'waste'>;
+  readonly type?: Extract<TxnType, 'issue' | 'waste' | 'adjust'>;
   /** Allow stock to be consumed that isn't there, recording the shortfall. */
   readonly allowNegative?: boolean;
+  /** Reach past-date lots as well. Only stocktakes and write-offs should. */
+  readonly includeExpired?: boolean;
   readonly note?: string;
 }
 
@@ -146,7 +183,8 @@ export function issue(db: Database, itemId: ItemId, options: IssueOptions): Issu
   const on = options.on ?? today();
   const want = convert(options.qty, options.uom ?? item.stockUom, item.stockUom, conversionContext(item));
 
-  const plan = planAllocation(db, itemId, want);
+  // Cooking on a date can only use what is still good on that date.
+  const plan = planAllocation(db, itemId, want, options.includeExpired ? undefined : on);
   if (plan.shortfall > 1e-9 && !options.allowNegative) {
     throw new ShortageError(itemId, plan.shortfall, item.stockUom);
   }
@@ -177,16 +215,39 @@ export function issue(db: Database, itemId: ItemId, options: IssueOptions): Issu
   };
 }
 
-/** Correct the books after a stocktake. */
-export function adjust(db: Database, itemId: ItemId, newQty: number, on: IsoDate = today()): InventoryTxn {
-  const current = onHand(db, itemId);
-  const delta = newQty - current;
+/**
+ * Correct the books after a stocktake.
+ *
+ * The movement is posted exactly once, as an `adjust`. Booking the delta and
+ * then posting a summary line on top of it would double the ledger against the
+ * lots it is supposed to explain, and an append-only ledger that does not
+ * reconcile is worse than no ledger.
+ */
+export function adjust(
+  db: Database,
+  itemId: ItemId,
+  newQty: number,
+  on: IsoDate = today(),
+): InventoryTxn[] {
+  const delta = newQty - onHand(db, itemId);
+  if (Math.abs(delta) <= 1e-9) return [];
+
   if (delta > 0) {
-    receive(db, itemId, { qty: delta, on, note: 'stocktake adjustment' });
-  } else if (delta < 0) {
-    issue(db, itemId, { qty: -delta, on, note: 'stocktake adjustment', allowNegative: true });
+    receive(db, itemId, { qty: delta, on, type: 'adjust', note: 'stocktake' });
+    const posted = db.ledger[db.ledger.length - 1];
+    return posted ? [posted] : [];
   }
-  return post(db, { at: on, type: 'adjust', itemId, qty: delta, note: 'stocktake' });
+
+  // A stocktake reaches everything physically present, expired included.
+  const result = issue(db, itemId, {
+    qty: -delta,
+    on,
+    type: 'adjust',
+    note: 'stocktake',
+    allowNegative: true,
+    includeExpired: true,
+  });
+  return [...result.txns];
 }
 
 export interface ExpiringLot {
@@ -262,7 +323,10 @@ export function stockValue(db: Database): number {
 
 export interface StockLine {
   readonly item: Item;
+  /** Physically present, expired included. */
   readonly qty: number;
+  /** Still fit to use — what planning is allowed to count on. */
+  readonly usable: number;
   readonly uom: UomCode;
   readonly lots: number;
   readonly value: number;
@@ -271,7 +335,7 @@ export interface StockLine {
 }
 
 /** Current stock, one line per item. */
-export function stockReport(db: Database): StockLine[] {
+export function stockReport(db: Database, asOf: IsoDate = today()): StockLine[] {
   const byItem = new Map<ItemId, Lot[]>();
   for (const lot of db.lots) {
     if (lot.qty <= 0) continue;
@@ -284,15 +348,20 @@ export function stockReport(db: Database): StockLine[] {
     .map(([itemId, lots]) => {
       const item = mustItem(db, itemId);
       const qty = lots.reduce((sum, lot) => sum + lot.qty, 0);
+      const usable = lots
+        .filter((lot) => !lot.expiresOn || lot.expiresOn >= asOf)
+        .reduce((sum, lot) => sum + lot.qty, 0);
       const expiries = lots.map((lot) => lot.expiresOn).filter((d): d is IsoDate => Boolean(d)).sort();
       return {
         item,
         qty,
+        usable,
         uom: item.stockUom,
         lots: lots.length,
         value: lots.reduce((sum, lot) => sum + lot.qty * (lot.unitCost ?? 0), 0),
         ...(expiries[0] ? { nextExpiry: expiries[0] } : {}),
-        belowSafety: item.safetyStock !== undefined && qty < item.safetyStock,
+        // Safety stock is about what you can cook with, not what is in the bin.
+        belowSafety: item.safetyStock !== undefined && usable < item.safetyStock,
       };
     })
     .sort((a, b) => a.item.category.localeCompare(b.item.category) || a.item.name.localeCompare(b.item.name));

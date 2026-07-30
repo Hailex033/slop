@@ -19,18 +19,19 @@
 import {
   conversionContext,
   findItem,
+  findSupplier,
   isMade,
   isStocked,
   mustItem,
   recipeFor,
 } from '../domain/db.js';
-import { addDays, maxDate, today, type IsoDate } from '../domain/date.js';
+import { addDays, maxDate, today, weekdayIndex, type IsoDate } from '../domain/date.js';
 import { nextId } from '../domain/ids.js';
 import { convert } from '../domain/units.js';
-import type { Database, ItemId, MealPlanEntry, ProductionOrder } from '../domain/types.js';
+import type { Database, Item, ItemId, MealPlanEntry, ProductionOrder } from '../domain/types.js';
 import { quantityForServings } from './explode.js';
 import { lowLevelCodes } from './graph.js';
-import { onHand, onOrder } from './inventory.js';
+import { availableOn, onOrder } from './inventory.js';
 import { recipeMinutes } from './rollup.js';
 
 /** Hours in a day you can realistically be cooking. Used for backward scheduling. */
@@ -55,6 +56,8 @@ export interface PlannedPurchase {
   readonly neededOn: IsoDate;
   /** Latest date you can buy it and still have it in time. */
   readonly orderBy: IsoDate;
+  /** True when even the earliest possible trip lands after it is needed. */
+  readonly late: boolean;
   readonly supplierId?: string;
   /** Demands this order covers, for pegging. */
   readonly pegging: readonly string[];
@@ -93,8 +96,13 @@ export interface MrpResult {
   readonly lines: readonly MrpLine[];
   readonly purchases: readonly PlannedPurchase[];
   readonly production: readonly PlannedProduction[];
-  /** Items with a net requirement and no way to get them. */
+  /** Data-level failures: a net requirement with no way at all to get it. */
   readonly problems: readonly string[];
+  /**
+   * Plan-level conflicts: it can be got, but not in time. The plan is still
+   * actionable, it just needs a decision — shop earlier, or eat later.
+   */
+  readonly conflicts: readonly string[];
 }
 
 export interface MrpOptions {
@@ -159,26 +167,36 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
   const purchases: PlannedPurchase[] = [];
   const production: PlannedProduction[] = [];
   const problems: string[] = [];
+  const conflicts: string[] = [];
   const consumedStock = new Map<ItemId, number>();
 
   const horizonEnd = addDays(asOf, horizonDays - 1);
 
   for (const itemId of order) {
+    const item = mustItem(db, itemId);
     const demands = demandsByItem.get(itemId) ?? [];
     // Orders already firmed up by a previous run. They are supply for this
     // item *and* a source of demand for its components — see below.
     const firmOrders = options.ignoreStock ? [] : firmProductionOrders(db, itemId, horizonEnd);
-    if (demands.length === 0 && firmOrders.length === 0) continue;
 
-    const item = mustItem(db, itemId);
+    // An item can also need attention with nothing planned at all: a buffer
+    // that has been eaten into still has to be rebuilt.
+    const safety = isStocked(item) ? (item.safetyStock ?? 0) : 0;
+    const needsTopUp =
+      !options.ignoreStock && safety > 0 && availableOn(db, itemId, asOf) + 1e-9 < safety;
+
+    if (demands.length === 0 && firmOrders.length === 0 && !needsTopUp) continue;
+
     const level = codes.get(itemId) ?? 0;
     const gross = demands.reduce((sum, d) => sum + d.qty, 0);
-    const dueOn = [
-      ...demands.map((d) => d.dueOn),
-      ...firmOrders.map((o) => o.dueOn),
-    ].reduce<IsoDate>((earliest, date) => (date < earliest ? date : earliest), horizonEnd);
+    const dates = [...demands.map((d) => d.dueOn), ...firmOrders.map((o) => o.dueOn)];
+    const dueOn = dates.reduce<IsoDate>((earliest, date) => (date < earliest ? date : earliest), dates[0] ?? asOf);
     const pegging = [
-      ...new Set([...demands.map((d) => d.source), ...firmOrders.map((o) => o.id)]),
+      ...new Set([
+        ...demands.map((d) => d.source),
+        ...firmOrders.map((o) => o.id),
+        ...(dates.length === 0 ? ['safety stock'] : []),
+      ]),
     ];
 
     // Phantoms are never stocked and never ordered: pass demand straight down.
@@ -199,12 +217,14 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       continue;
     }
 
-    const stock = options.ignoreStock ? 0 : Math.max(0, onHand(db, itemId) - (consumedStock.get(itemId) ?? 0));
+    // Only stock that is still good on the day it is wanted counts as supply.
+    const stock = options.ignoreStock
+      ? 0
+      : Math.max(0, availableOn(db, itemId, dueOn) - (consumedStock.get(itemId) ?? 0));
     const firmSupply = firmOrders
       .filter((firm) => firm.dueOn <= dueOn)
       .reduce((sum, firm) => sum + firm.qty, 0);
     const incoming = (options.ignoreStock ? 0 : onOrder(db, itemId, dueOn)) + firmSupply;
-    const safety = item.safetyStock ?? 0;
     const net = Math.max(0, gross + safety - stock - incoming);
 
     consumedStock.set(itemId, (consumedStock.get(itemId) ?? 0) + Math.min(stock, gross));
@@ -265,11 +285,17 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       continue;
     }
 
-    // Purchased: schedule the shopping trip by lead time.
-    const leadTime = item.purchase?.leadTimeDays ?? 0;
-    const orderBy = maxDate(asOf, addDays(dueOn, -leadTime));
+    // Purchased: schedule the shopping trip by lead time and shop opening days.
     if (!item.purchase) {
       problems.push(`"${item.name}" is short by ${net.toFixed(1)} ${item.stockUom} but has no supplier.`);
+    }
+    const trip = schedulePurchase(db, item, dueOn, asOf);
+    if (trip.late) {
+      const supplier = item.purchase ? findSupplier(db, item.purchase.supplierId) : undefined;
+      conflicts.push(
+        `${item.name} is needed ${dueOn}, but ${supplier?.name ?? 'the supplier'} cannot supply ` +
+          `it in time — the earliest trip is ${trip.orderBy}.`,
+      );
     }
     purchases.push({
       itemId,
@@ -277,7 +303,8 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       qty: net,
       uom: item.stockUom,
       neededOn: dueOn,
-      orderBy,
+      orderBy: trip.orderBy,
+      late: trip.late,
       ...(item.purchase ? { supplierId: item.purchase.supplierId } : {}),
       pegging,
     });
@@ -292,7 +319,45 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       (a, b) => a.startOn.localeCompare(b.startOn) || b.level - a.level || a.name.localeCompare(b.name),
     ),
     problems,
+    conflicts,
   };
+}
+
+/**
+ * When to go shopping.
+ *
+ * Lead time sets the latest useful day; the supplier's opening days decide
+ * which of the days before it you can actually go. A Saturday market cannot
+ * supply Friday's dinner however early you plan, and saying so is more useful
+ * than quietly printing an impossible date.
+ */
+function schedulePurchase(
+  db: Database,
+  item: Item,
+  neededOn: IsoDate,
+  asOf: IsoDate,
+): { orderBy: IsoDate; late: boolean } {
+  const leadTime = item.purchase?.leadTimeDays ?? 0;
+  const latest = addDays(neededOn, -leadTime);
+  const supplier = item.purchase ? findSupplier(db, item.purchase.supplierId) : undefined;
+  const openOn = supplier?.deliveryDays;
+
+  if (!openOn || openOn.length === 0) {
+    return { orderBy: maxDate(asOf, latest), late: latest < asOf };
+  }
+
+  // Walk back from the last useful day to today, looking for an open day.
+  for (let date = latest; date >= asOf; date = addDays(date, -1)) {
+    if (openOn.includes(weekdayIndex(date))) return { orderBy: date, late: false };
+  }
+
+  // Nothing in the window: report the first opening after it, so the plan shows
+  // the real constraint rather than an impossible instruction.
+  for (let i = 0; i < 14; i += 1) {
+    const date = addDays(asOf, i);
+    if (openOn.includes(weekdayIndex(date))) return { orderBy: date, late: true };
+  }
+  return { orderBy: maxDate(asOf, latest), late: true };
 }
 
 /**

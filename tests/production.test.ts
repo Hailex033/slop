@@ -225,3 +225,14 @@ test('prep tasks within a day run deepest-first', () => {
   assert.ok(positionOf('besciamella') < positionOf('lasagne'));
   assert.ok(positionOf('pasta-sheets') < positionOf('lasagne'));
 });
+
+test('feasibility ignores stock that has gone off', () => {
+  const database = nestedDb();
+  receive(database, 'sauce', { qty: 1000, on: '2026-07-01', expiresOn: '2026-07-05' });
+  receive(database, 'crust', { qty: 300, on: '2026-07-01' });
+  receive(database, 'cheese', { qty: 200, on: '2026-07-01' });
+
+  assert.ok(close(feasibility(database, 'dish', 4, '2026-07-03').servings, 4, 1e-3));
+  // A week later the sauce is off and there is nothing to make more from.
+  assert.ok(feasibility(database, 'dish', 4, '2026-07-10').servings < 0.01);
+});
