@@ -19,9 +19,17 @@ export function loadDb(path = defaultDbPath()): Database {
     throw new MiseError(`No database at ${path}. Run \`mise init\` to create one.`);
   }
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<Database>;
+  const base = emptyDb();
   // Merge onto an empty database so that a file written by an older version,
-  // or hand-edited, still loads with every collection present.
-  return { ...emptyDb(parsed.settings ?? {}), ...parsed } as Database;
+  // or hand-edited, still loads with every collection present. Settings are
+  // merged *after* the top-level spread: spreading `parsed` last would put the
+  // partial settings object back over the defaults and hand `undefined`
+  // horizons and households to the planner.
+  return {
+    ...base,
+    ...parsed,
+    settings: { ...base.settings, ...(parsed.settings ?? {}) },
+  } as Database;
 }
 
 /** Write atomically: a half-written pantry is worse than no pantry. */

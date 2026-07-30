@@ -339,14 +339,57 @@ export interface NutritionFacts {
   readonly missing: readonly ItemId[];
 }
 
+/**
+ * Nutrition for a specific quantity.
+ *
+ * Like `costOf`, this walks the tree at the requested quantity rather than
+ * scaling the per-unit rollup, because a `scalable: false` component does not
+ * grow with the batch: two batches of a dough containing one egg contain one
+ * egg, and should not report two eggs' worth of protein.
+ */
 export function nutritionOf(db: Database, itemId: ItemId, qty: number, uom?: UomCode): NutritionFacts {
   const item = mustItem(db, itemId);
   const inStock = convert(qty, uom ?? item.stockUom, item.stockUom, conversionContext(item));
-  const rollup = rollupNutrition(db, itemId);
   const recipe = recipeFor(db, itemId);
 
-  const total = addNutrients(ZERO, rollup.perStockUnit, inStock);
-  const grams = rollup.gramsPerStockUnit * inStock;
+  let total = ZERO;
+  const missing = new Set<ItemId>();
+
+  const walk = (id: ItemId, quantity: number, seen: ReadonlySet<ItemId>): void => {
+    const current = mustItem(db, id);
+    const currentRecipe = isMade(current) && !seen.has(id) ? recipeFor(db, id) : undefined;
+
+    if (!currentRecipe) {
+      const grams = gramsOf(current, quantity);
+      const per100 = current.nutrientsPer100g;
+      if (per100 && grams !== undefined) total = addNutrients(total, per100, grams / 100);
+      else missing.add(id);
+      return;
+    }
+
+    const nextSeen = new Set(seen).add(id);
+    const batchQty = convert(
+      currentRecipe.yieldQty,
+      currentRecipe.yieldUom,
+      current.stockUom,
+      conversionContext(current),
+    );
+    const batches = batchQty === 0 ? 0 : quantity / batchQty;
+
+    for (const component of currentRecipe.components) {
+      const child = findItem(db, component.itemId);
+      if (!child) continue;
+      const scaled = component.scalable === false ? component.qty : component.qty * batches;
+      // Net, not gross: peel and trim are paid for but not eaten.
+      const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));
+      walk(child.id, net, nextSeen);
+    }
+  };
+  walk(itemId, inStock, new Set());
+
+  // Output mass: prefer the item's own conversion, else fall back to the
+  // per-unit rollup, which knows about reduction.
+  const grams = gramsOf(item, inStock) ?? rollupNutrition(db, itemId).gramsPerStockUnit * inStock;
   const servings = recipe
     ? (inStock /
         convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item))) *
@@ -359,8 +402,8 @@ export function nutritionOf(db: Database, itemId: ItemId, qty: number, uom?: Uom
     per100g: addNutrients(ZERO, total, grams > 0 ? 100 / grams : 0),
     servings,
     grams,
-    complete: rollup.complete,
-    missing: rollup.missing,
+    complete: missing.size === 0,
+    missing: [...missing],
   };
 }
 

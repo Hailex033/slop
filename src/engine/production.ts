@@ -16,7 +16,7 @@ import { convert } from '../domain/units.js';
 import { nextId } from '../domain/ids.js';
 import type { Database, ItemId, ProductionOrder } from '../domain/types.js';
 import { quantityForServings, servingsForQuantity } from './explode.js';
-import { availableOn, issue, receive } from './inventory.js';
+import { availableOn, issue, receive, transactionally } from './inventory.js';
 import type { MrpResult, PlannedProduction } from './mrp.js';
 import { recipeMinutes, rollupTime } from './rollup.js';
 
@@ -342,6 +342,17 @@ export function produce(
   qty: number,
   options: ProduceOptions = {},
 ): ProductionResult {
+  // The outermost call owns the rollback boundary; the recursion below calls
+  // `produceInner` directly so a cascade is undone as one unit with its parent.
+  return transactionally(db, () => produceInner(db, itemId, qty, options));
+}
+
+function produceInner(
+  db: Database,
+  itemId: ItemId,
+  qty: number,
+  options: ProduceOptions = {},
+): ProductionResult {
   const { cascade = true, allowShortages = false, includeOptional = false } = options;
   const on = options.on ?? today();
   const item = mustItem(db, itemId);
@@ -372,7 +383,7 @@ export function produce(
     // Phantom: nothing to take off a shelf, so make it inline and charge its
     // components to this order.
     if (!isStocked(child)) {
-      const inner = produce(db, child.id, need, {
+      const inner = produceInner(db, child.id, need, {
         ...options,
         on,
         ref,
@@ -396,17 +407,16 @@ export function produce(
     const available = availableOn(db, child.id, on);
     if (available + 1e-9 < need && isMade(child) && cascade) {
       const gap = need - available;
-      const inner = produce(db, child.id, gap, { ...options, on, ref });
+      const inner = produceInner(db, child.id, gap, { ...options, on, ref });
       shortages.push(...inner.shortages);
       madeToOrder = true;
     }
 
-    const result = issue(db, child.id, {
-      qty: need,
-      on,
-      ref,
-      allowNegative: allowShortages || options.consumeImmediately === true,
-    });
+    // `consumeImmediately` decides whether the *output* gets booked into stock.
+    // It must not quietly relax the caller's shortage policy: a recipe that
+    // happens to contain a phantom should fail exactly as loudly as one that
+    // does not.
+    const result = issue(db, child.id, { qty: need, on, ref, allowNegative: allowShortages });
     cost += result.cost;
     if (result.shortfall > 1e-9) {
       shortages.push({ itemId: child.id, name: child.name, short: result.shortfall, uom: child.stockUom });
@@ -491,7 +501,7 @@ export function serve(
       minutes: 0,
     };
   } else {
-    result = produce(db, itemId, qty - available, { ...options, on });
+    result = produceInner(db, itemId, qty - available, { ...options, on });
   }
 
   // The cost of a meal is the cost of the lots it came out of, whether those

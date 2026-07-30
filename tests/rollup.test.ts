@@ -137,6 +137,31 @@ test('reduction concentrates nutrition per 100 g without inventing calories', ()
   assert.ok(close(facts.per100g.kcal, 20, 1e-9), 'but it is twice as concentrated');
 });
 
+test('nutrition does not scale a fixed component with the batch', () => {
+  const database = db(
+    [
+      purchased('base', { nutrientsPer100g: { kcal: 100, proteinG: 0, fatG: 0, carbG: 0 } }),
+      purchased('egg', {
+        stockUom: 'ea',
+        unitWeightG: 50,
+        nutrientsPer100g: { kcal: 200, proteinG: 0, fatG: 0, carbG: 0 },
+      }),
+      made('batch', { densityGPerMl: 1 }),
+    ],
+    [
+      recipe('batch', 100, [
+        { itemId: 'base', qty: 100, uom: 'g' },
+        { itemId: 'egg', qty: 1, uom: 'ea', scalable: false },
+      ]),
+    ],
+  );
+
+  // One batch: 100 kcal of base plus one 50 g egg at 200 kcal/100 g = 200 kcal.
+  assert.ok(close(nutritionOf(database, 'batch', 100, 'g').total.kcal, 200, 1e-9));
+  // Two batches: twice the base, still one egg.
+  assert.ok(close(nutritionOf(database, 'batch', 200, 'g').total.kcal, 300, 1e-9));
+});
+
 test('allergens union across the whole tree, flagging optional-only paths', () => {
   const database = db(
     [

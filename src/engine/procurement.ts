@@ -9,7 +9,7 @@
  */
 
 import { conversionContext, findSupplier, mustItem } from '../domain/db.js';
-import { addDays, today, type IsoDate } from '../domain/date.js';
+import { addDays, maxDate, today, type IsoDate } from '../domain/date.js';
 import { MiseError, NotFoundError } from '../domain/errors.js';
 import { nextId } from '../domain/ids.js';
 import { convert, type UomCode } from '../domain/units.js';
@@ -185,25 +185,34 @@ export function raisePurchaseOrders(
   list: ShoppingList,
   on: IsoDate = today(),
 ): PurchaseOrder[] {
-  const bySupplierId = new Map<SupplierId, ShoppingLine[]>();
+  // One order per *trip*, not per supplier. Two visits to the same market on
+  // different Saturdays are two orders arriving on two different days, and
+  // collapsing them would misdate one of them.
+  const trips = new Map<string, { supplierId: SupplierId; orderBy: IsoDate; lines: ShoppingLine[] }>();
   for (const line of list.lines) {
     if (!line.supplierId || line.packs <= 0) continue;
-    const group = bySupplierId.get(line.supplierId);
-    if (group) group.push(line);
-    else bySupplierId.set(line.supplierId, [line]);
+    const key = `${line.supplierId}@${line.orderBy}`;
+    const trip = trips.get(key);
+    if (trip) trip.lines.push(line);
+    else trips.set(key, { supplierId: line.supplierId, orderBy: line.orderBy, lines: [line] });
   }
 
   const created: PurchaseOrder[] = [];
-  for (const [supplierId, lines] of bySupplierId) {
-    const supplier = findSupplier(db, supplierId);
+  for (const trip of [...trips.values()].sort((a, b) => a.orderBy.localeCompare(b.orderBy))) {
+    const supplier = findSupplier(db, trip.supplierId);
     const leadTime = supplier?.leadTimeDays ?? 0;
+    // The shopping line already worked out the first day this supplier can
+    // actually be visited. Stamping the order with today + lead time instead
+    // would claim delivery on a day the shop is shut, and the next planning
+    // run would count it as supply and lose the conflict.
+    const orderedOn = maxDate(on, trip.orderBy);
     const order: PurchaseOrder = {
       id: nextId('PO', [...db.purchaseOrders, ...created]),
-      supplierId,
-      orderedOn: on,
-      expectedOn: addDays(on, leadTime),
+      supplierId: trip.supplierId,
+      orderedOn,
+      expectedOn: addDays(orderedOn, leadTime),
       status: 'open',
-      lines: lines.map((line) => ({
+      lines: trip.lines.map((line) => ({
         itemId: line.itemId,
         packs: line.packs,
         unitPrice: mustItem(db, line.itemId).purchase?.packPrice ?? 0,

@@ -3,8 +3,9 @@ import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
 import { onHand, receive } from '../src/engine/inventory.js';
 import { runMrp } from '../src/engine/mrp.js';
-import { packsFor, shoppingList } from '../src/engine/procurement.js';
+import { packsFor, raisePurchaseOrders, shoppingList } from '../src/engine/procurement.js';
 import { cookableNow, feasibility, prepSchedule, produce } from '../src/engine/production.js';
+import { ShortageError } from '../src/domain/errors.js';
 import { close, db, made, nestedDb, purchased, recipe } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -59,6 +60,41 @@ test('the shopping list says what each line is for', () => {
   const list = shoppingList(database, mrp);
 
   assert.deepEqual(list.lines.find((line) => line.itemId === 'butter')!.forDishes, ['dish']);
+});
+
+test('a purchase order is stamped for the day the shop is actually open', () => {
+  const database = nestedDb();
+  database.suppliers = [{ id: 'shop', name: 'Saturday market', leadTimeDays: 0, deliveryDays: [6] }];
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-09', slot: 'dinner', itemId: 'cheese', servings: 200 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
+  const list = shoppingList(database, mrp);
+  const [order] = raisePurchaseOrders(database, list, '2026-07-06');
+
+  // The Thursday meal cannot be supplied; the next market day is Saturday 11th.
+  assert.ok(order);
+  assert.equal(order.expectedOn, '2026-07-11');
+
+  // And committing must not make the conflict disappear: the delivery still
+  // lands after the meal, so the next run says so just as loudly.
+  const after = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
+  assert.equal(after.lines.find((line) => line.itemId === 'cheese')!.onOrder, 0);
+  assert.equal(after.conflicts.length, 1);
+});
+
+test('one purchase order per trip, not per supplier', () => {
+  const database = nestedDb();
+  database.suppliers = [{ id: 'shop', name: 'Shop', leadTimeDays: 0 }];
+  database.mealPlan.push(
+    { id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'cheese', servings: 200 },
+    { id: 'MP-2', date: '2026-07-20', slot: 'dinner', itemId: 'butter', servings: 200 },
+  );
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 30 });
+  const orders = raisePurchaseOrders(database, shoppingList(database, mrp), '2026-07-01');
+
+  assert.equal(orders.length, 2, 'two different shopping days are two orders');
+  assert.deepEqual(orders.map((order) => order.expectedOn).sort(), ['2026-07-03', '2026-07-20']);
 });
 
 // ---------------------------------------------------------------------------
@@ -235,4 +271,41 @@ test('feasibility ignores stock that has gone off', () => {
   assert.ok(close(feasibility(database, 'dish', 4, '2026-07-03').servings, 4, 1e-3));
   // A week later the sauce is off and there is nothing to make more from.
   assert.ok(feasibility(database, 'dish', 4, '2026-07-10').servings < 0.01);
+});
+
+// ---------------------------------------------------------------------------
+// Failure handling
+// ---------------------------------------------------------------------------
+
+test('a shortage below a phantom is refused, exactly as one above it would be', () => {
+  const database = nestedDb();
+  // Sauce reaches butter and flour through the roux, which is a phantom.
+  // Passing through a phantom must not quietly relax the shortage policy.
+  assert.throws(() => produce(database, 'sauce', 1000, { on: '2026-07-01' }), ShortageError);
+  assert.equal(onHand(database, 'sauce'), 0, 'nothing was booked in');
+});
+
+test('a failed production leaves the pantry exactly as it found it', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 500, unitCost: 0.01 });
+  receive(database, 'flour', { qty: 500, unitCost: 0.01 });
+  // No cheese, so the dish fails — but only after butter and flour have been
+  // issued to the sauce and the crust.
+  const ledgerBefore = database.ledger.length;
+
+  assert.throws(() => produce(database, 'dish', 1500, { on: '2026-07-01' }), ShortageError);
+
+  assert.equal(onHand(database, 'butter'), 500, 'the butter is back');
+  assert.equal(onHand(database, 'flour'), 500);
+  assert.equal(onHand(database, 'sauce'), 0, 'and the half-made sauce is gone');
+  assert.equal(database.ledger.length, ledgerBefore, 'the ledger records nothing that did not happen');
+});
+
+test('shortages are still reported rather than thrown when asked for', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 10 });
+
+  const result = produce(database, 'sauce', 1000, { on: '2026-07-01', allowShortages: true });
+  assert.ok(result.shortages.length > 0);
+  assert.equal(onHand(database, 'sauce'), 1000, 'the cook pressed on regardless');
 });

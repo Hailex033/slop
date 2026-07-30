@@ -31,7 +31,7 @@ import { convert } from '../domain/units.js';
 import type { Database, Item, ItemId, MealPlanEntry, ProductionOrder } from '../domain/types.js';
 import { quantityForServings } from './explode.js';
 import { lowLevelCodes } from './graph.js';
-import { availableOn, onOrder } from './inventory.js';
+import { availableOn } from './inventory.js';
 import { recipeMinutes } from './rollup.js';
 
 /** Hours in a day you can realistically be cooking. Used for backward scheduling. */
@@ -168,7 +168,6 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
   const production: PlannedProduction[] = [];
   const problems: string[] = [];
   const conflicts: string[] = [];
-  const consumedStock = new Map<ItemId, number>();
 
   const horizonEnd = addDays(asOf, horizonDays - 1);
 
@@ -183,21 +182,14 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
     // that has been eaten into still has to be rebuilt.
     const safety = isStocked(item) ? (item.safetyStock ?? 0) : 0;
     const needsTopUp =
-      !options.ignoreStock && safety > 0 && availableOn(db, itemId, asOf) + 1e-9 < safety;
+      !options.ignoreStock && safety > 0 && availableOn(db, itemId, horizonEnd) + 1e-9 < safety;
 
     if (demands.length === 0 && firmOrders.length === 0 && !needsTopUp) continue;
 
     const level = codes.get(itemId) ?? 0;
     const gross = demands.reduce((sum, d) => sum + d.qty, 0);
     const dates = [...demands.map((d) => d.dueOn), ...firmOrders.map((o) => o.dueOn)];
-    const dueOn = dates.reduce<IsoDate>((earliest, date) => (date < earliest ? date : earliest), dates[0] ?? asOf);
-    const pegging = [
-      ...new Set([
-        ...demands.map((d) => d.source),
-        ...firmOrders.map((o) => o.id),
-        ...(dates.length === 0 ? ['safety stock'] : []),
-      ]),
-    ];
+    const earliest = dates.reduce<IsoDate>((soonest, date) => (date < soonest ? date : soonest), dates[0] ?? asOf);
 
     // Phantoms are never stocked and never ordered: pass demand straight down.
     if (!isStocked(item)) {
@@ -213,21 +205,39 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
         uom: item.stockUom,
         action: 'phantom',
       });
-      explodeOneLevel(db, itemId, gross, dueOn, level, pegging, addDemand, options.includeOptional);
+      explodeOneLevel(
+        db,
+        itemId,
+        gross,
+        earliest,
+        level,
+        [...new Set([...demands.map((d) => d.source), ...firmOrders.map((o) => o.id)])],
+        addDemand,
+        options.includeOptional,
+      );
       continue;
     }
 
-    // Only stock that is still good on the day it is wanted counts as supply.
-    const stock = options.ignoreStock
-      ? 0
-      : Math.max(0, availableOn(db, itemId, dueOn) - (consumedStock.get(itemId) ?? 0));
-    const firmSupply = firmOrders
-      .filter((firm) => firm.dueOn <= dueOn)
-      .reduce((sum, firm) => sum + firm.qty, 0);
-    const incoming = (options.ignoreStock ? 0 : onOrder(db, itemId, dueOn)) + firmSupply;
-    const net = Math.max(0, gross + safety - stock - incoming);
+    // Net date by date. A carton that goes off on Thursday is supply for
+    // Wednesday's dinner and not for Friday's, so a single lump comparison
+    // against the earliest due date would let one carton cover the whole week.
+    const requirements = [...demands].sort((a, b) => a.dueOn.localeCompare(b.dueOn));
+    if (safety > 0) {
+      // Safety stock is a floor on the closing balance: it has to be there at
+      // the end, after everything planned has been eaten.
+      requirements.push({ itemId, qty: safety, dueOn: horizonEnd, source: SAFETY_STOCK, level });
+    }
 
-    consumedStock.set(itemId, (consumedStock.get(itemId) ?? 0) + Math.min(stock, gross));
+    const allocation = allocate(supplyFor(db, item, firmOrders, options), requirements);
+    const net = allocation.shortfalls.reduce((sum, short) => sum + short.qty, 0);
+    const dueOn = allocation.shortfalls[0]?.dueOn ?? earliest;
+    const pegging = [
+      ...new Set(
+        allocation.shortfalls.length > 0
+          ? allocation.shortfalls.map((short) => short.source)
+          : [...demands.map((d) => d.source), ...firmOrders.map((o) => o.id)],
+      ),
+    ];
 
     const action: MrpLine['action'] = net <= 1e-9 ? 'covered' : isMade(item) ? 'make' : 'buy';
     lines.push({
@@ -235,8 +245,8 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       name: item.name,
       level,
       gross,
-      onHand: stock,
-      onOrder: incoming,
+      onHand: allocation.fromStock,
+      onOrder: allocation.fromOrders,
       safetyStock: safety,
       net,
       uom: item.stockUom,
@@ -321,6 +331,122 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
     problems,
     conflicts,
   };
+}
+
+/** Pegging label for a requirement that exists only to rebuild a buffer. */
+const SAFETY_STOCK = 'safety stock';
+
+/**
+ * A quantity of supply, with the window in which it can actually be used.
+ *
+ * Stock in the fridge is available now and stops being available at its expiry
+ * date; a delivery or a batch you have committed to cooking is available from
+ * the day it lands and then keeps. Expressing both as a window is what lets one
+ * allocator handle them together.
+ */
+interface SupplyBucket {
+  qty: number;
+  /** Not usable before this date. Absent means it is already here. */
+  readonly from?: IsoDate;
+  /** Not usable after this date. Absent means it keeps. */
+  readonly until?: IsoDate;
+  readonly kind: 'stock' | 'order';
+}
+
+function supplyFor(
+  db: Database,
+  item: Item,
+  firmOrders: readonly ProductionOrder[],
+  options: MrpOptions,
+): SupplyBucket[] {
+  if (options.ignoreStock) return [];
+  const buckets: SupplyBucket[] = [];
+
+  for (const lot of db.lots) {
+    if (lot.itemId !== item.id || lot.qty <= 0) continue;
+    buckets.push({
+      qty: lot.qty,
+      kind: 'stock',
+      ...(lot.expiresOn ? { until: lot.expiresOn } : {}),
+    });
+  }
+
+  for (const order of db.purchaseOrders) {
+    if (order.status !== 'open') continue;
+    for (const line of order.lines) {
+      if (line.itemId !== item.id || !item.purchase) continue;
+      buckets.push({
+        qty: convert(
+          line.packs * item.purchase.packQty,
+          item.purchase.packUom,
+          item.stockUom,
+          conversionContext(item),
+        ),
+        from: order.expectedOn,
+        kind: 'order',
+      });
+    }
+  }
+
+  for (const order of firmOrders) {
+    buckets.push({ qty: order.qty, from: order.dueOn, kind: 'order' });
+  }
+
+  // First-expired-first-out, so the carton that is about to turn gets used
+  // before the one that keeps.
+  return buckets.sort((a, b) => {
+    if (a.until && b.until) return a.until.localeCompare(b.until);
+    if (a.until) return -1;
+    if (b.until) return 1;
+    return (a.from ?? '').localeCompare(b.from ?? '');
+  });
+}
+
+interface Shortfall {
+  readonly qty: number;
+  readonly dueOn: IsoDate;
+  readonly source: string;
+}
+
+interface Allocation {
+  readonly fromStock: number;
+  readonly fromOrders: number;
+  readonly shortfalls: readonly Shortfall[];
+}
+
+/**
+ * Consume supply against dated requirements, earliest first.
+ *
+ * Each requirement may only draw on supply whose window covers its date, which
+ * is what makes "400 g expiring on the 5th" cover a meal on the 2nd and not one
+ * on the 10th. Requirements are taken in date order so that the earlier meal
+ * gets first call on the food that is about to go off.
+ */
+function allocate(buckets: SupplyBucket[], requirements: readonly Demand[]): Allocation {
+  const shortfalls: Shortfall[] = [];
+  let fromStock = 0;
+  let fromOrders = 0;
+
+  for (const requirement of requirements) {
+    let remaining = requirement.qty;
+    for (const bucket of buckets) {
+      if (remaining <= 1e-9) break;
+      if (bucket.qty <= 1e-9) continue;
+      if (bucket.from && bucket.from > requirement.dueOn) continue;
+      if (bucket.until && bucket.until < requirement.dueOn) continue;
+
+      const take = Math.min(bucket.qty, remaining);
+      bucket.qty -= take;
+      remaining -= take;
+      if (bucket.kind === 'stock') fromStock += take;
+      else fromOrders += take;
+    }
+    if (remaining > 1e-9) {
+      shortfalls.push({ qty: remaining, dueOn: requirement.dueOn, source: requirement.source });
+    }
+  }
+
+  return { fromStock, fromOrders, shortfalls };
 }
 
 /**

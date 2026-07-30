@@ -316,6 +316,34 @@ export function onOrder(db: Database, itemId: ItemId, by: IsoDate): number {
   return total;
 }
 
+/**
+ * Run `work` as a unit: if it throws, the pantry and the ledger are left
+ * exactly as they were.
+ *
+ * Cooking is a multi-step mutation — issue the mince, issue the passata, book
+ * the ragù — and a recipe that fails on its fourth ingredient must not eat the
+ * first three. Every mutation in this module goes through lot quantities and
+ * the ledger, so restoring those two restores everything.
+ */
+export function transactionally<T>(db: Database, work: () => T): T {
+  const lots = [...db.lots];
+  const quantities = lots.map((lot) => lot.qty);
+  const ledgerLength = db.ledger.length;
+
+  try {
+    return work();
+  } catch (error) {
+    // `issue` replaces db.lots with a filtered array and `receive` pushes to
+    // it, so both the array and the quantities on it have to be put back.
+    db.lots = lots;
+    lots.forEach((lot, index) => {
+      lot.qty = quantities[index]!;
+    });
+    db.ledger.length = ledgerLength;
+    throw error;
+  }
+}
+
 /** Value of everything in the pantry, at actual cost where known. */
 export function stockValue(db: Database): number {
   return db.lots.reduce((sum, lot) => sum + lot.qty * (lot.unitCost ?? 0), 0);
