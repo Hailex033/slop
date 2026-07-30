@@ -1,0 +1,429 @@
+/**
+ * Production: prep scheduling, and actually cooking things.
+ *
+ * `executeProduction` is where the recursion stops being a report and starts
+ * moving stock. Cooking a béchamel issues butter, flour and milk out of real
+ * lots and books a real tub of béchamel back in, at the cost of the lots it
+ * actually came from. If the roux it needs isn't in the fridge, it makes the
+ * roux first — a cascading, make-to-order backflush that falls straight out of
+ * the same recursive structure the shopping list uses.
+ */
+
+import { conversionContext, findItem, isMade, isStocked, mustItem, recipeFor } from '../domain/db.js';
+import { today, type IsoDate } from '../domain/date.js';
+import { MiseError, NotFoundError } from '../domain/errors.js';
+import { convert } from '../domain/units.js';
+import { nextId } from '../domain/ids.js';
+import type { Database, ItemId, ProductionOrder } from '../domain/types.js';
+import { aggregate, explode, quantityForServings, servingsForQuantity } from './explode.js';
+import { onHand, issue, receive } from './inventory.js';
+import type { MrpResult, PlannedProduction } from './mrp.js';
+import { recipeMinutes, rollupTime } from './rollup.js';
+
+// ---------------------------------------------------------------------------
+// Scheduling
+// ---------------------------------------------------------------------------
+
+export interface PrepTask {
+  readonly itemId: ItemId;
+  readonly name: string;
+  readonly qty: number;
+  readonly uom: string;
+  readonly servings: number;
+  readonly on: IsoDate;
+  readonly dueOn: IsoDate;
+  readonly activeMin: number;
+  readonly passiveMin: number;
+  /** Depth in the recipe graph — deeper tasks must happen first. */
+  readonly level: number;
+  readonly forDish?: string;
+  readonly steps: readonly string[];
+}
+
+export interface PrepDay {
+  readonly date: IsoDate;
+  readonly tasks: readonly PrepTask[];
+  readonly activeMin: number;
+  readonly passiveMin: number;
+}
+
+/**
+ * Turn planned production into a day-by-day prep plan.
+ *
+ * Within a day tasks are ordered deepest-first, which is the only order that
+ * works: the roux before the béchamel before the lasagne.
+ */
+export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
+  const byDate = new Map<IsoDate, PrepTask[]>();
+
+  for (const planned of mrp.production) {
+    const task = toPrepTask(db, planned);
+    const list = byDate.get(task.on);
+    if (list) list.push(task);
+    else byDate.set(task.on, [task]);
+  }
+
+  return [...byDate.entries()]
+    .map(([date, tasks]) => {
+      const ordered = [...tasks].sort((a, b) => b.level - a.level || a.name.localeCompare(b.name));
+      return {
+        date,
+        tasks: ordered,
+        activeMin: ordered.reduce((sum, t) => sum + t.activeMin, 0),
+        passiveMin: ordered.reduce((sum, t) => sum + t.passiveMin, 0),
+      };
+    })
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function toPrepTask(db: Database, planned: PlannedProduction): PrepTask {
+  const recipe = recipeFor(db, planned.itemId);
+  const minutes = recipe ? recipeMinutes(recipe) : { active: 0, passive: 0 };
+  return {
+    itemId: planned.itemId,
+    name: planned.name,
+    qty: planned.qty,
+    uom: planned.uom,
+    servings: planned.servings,
+    on: planned.startOn,
+    dueOn: planned.dueOn,
+    activeMin: minutes.active,
+    passiveMin: minutes.passive,
+    level: planned.level,
+    steps: (recipe?.steps ?? []).map((step) => step.text),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Feasibility — "what can I actually cook right now?"
+// ---------------------------------------------------------------------------
+
+export interface Feasibility {
+  readonly itemId: ItemId;
+  readonly name: string;
+  /** Servings you could make from stock alone. */
+  readonly servings: number;
+  /** Fraction of the required ingredients (by count) that you have. */
+  readonly coverage: number;
+  readonly missing: readonly Shortage[];
+  /** Longest unavoidable wait, in minutes, including sub-recipes. */
+  readonly criticalPathMin: number;
+}
+
+/** A quantity of something that was needed and not there. */
+export interface Shortage {
+  readonly itemId: ItemId;
+  readonly name: string;
+  readonly short: number;
+  readonly uom: string;
+}
+
+/**
+ * How much of something you could make from what's in the house.
+ *
+ * Explodes to purchased leaves first, so shared ingredients are pooled before
+ * being compared against stock: a recipe using butter in two places is limited
+ * by its *total* butter need, not by either line on its own.
+ */
+export function feasibility(db: Database, itemId: ItemId, targetServings?: number): Feasibility {
+  const item = mustItem(db, itemId);
+  const recipe = recipeFor(db, itemId);
+  const servingsPerBatch = recipe?.servings ?? 1;
+  const probe = targetServings ?? servingsPerBatch;
+
+  const tree = explode(db, { itemId, servings: probe });
+  const requirements = aggregate(tree, { level: 'leaves', includeOptional: false });
+
+  let ratio = Number.POSITIVE_INFINITY;
+  let have = 0;
+  const missing: Shortage[] = [];
+
+  for (const requirement of requirements) {
+    const stock = onHand(db, requirement.itemId);
+    if (requirement.qty <= 1e-9) continue;
+    const covered = stock / requirement.qty;
+    ratio = Math.min(ratio, covered);
+    if (covered >= 1) {
+      have += 1;
+    } else {
+      missing.push({
+        itemId: requirement.itemId,
+        name: requirement.item.name,
+        short: requirement.qty - stock,
+        uom: requirement.uom,
+      });
+    }
+  }
+
+  if (!Number.isFinite(ratio)) ratio = 0;
+  const time = rollupTime(db, itemId);
+
+  return {
+    itemId,
+    name: item.name,
+    servings: ratio * probe,
+    coverage: requirements.length === 0 ? 0 : have / requirements.length,
+    missing: missing.sort((a, b) => b.short - a.short),
+    criticalPathMin: time.criticalPathMin,
+  };
+}
+
+/** Rank everything you could plausibly cook tonight. */
+export function cookableNow(db: Database, minServings = 1): Feasibility[] {
+  return db.items
+    .filter((item) => isMade(item) && isStocked(item) && recipeFor(db, item.id))
+    .map((item) => feasibility(db, item.id))
+    .filter((result) => result.servings >= minServings)
+    .sort((a, b) => b.servings - a.servings || a.criticalPathMin - b.criticalPathMin);
+}
+
+/** The near-misses: dishes one or two ingredients away from being possible. */
+export function almostCookable(db: Database, maxMissing = 2): Feasibility[] {
+  return db.items
+    .filter((item) => isMade(item) && isStocked(item) && recipeFor(db, item.id))
+    .map((item) => feasibility(db, item.id))
+    .filter((result) => result.servings < 1 && result.missing.length > 0 && result.missing.length <= maxMissing)
+    .sort((a, b) => a.missing.length - b.missing.length || b.coverage - a.coverage);
+}
+
+// ---------------------------------------------------------------------------
+// Execution
+// ---------------------------------------------------------------------------
+
+export interface ConsumedLine {
+  readonly itemId: ItemId;
+  readonly name: string;
+  readonly qty: number;
+  readonly uom: string;
+  readonly cost: number;
+  readonly shortfall: number;
+  /** True when this component had to be cooked on the spot rather than taken from stock. */
+  readonly madeToOrder: boolean;
+}
+
+export interface ProductionResult {
+  readonly itemId: ItemId;
+  readonly name: string;
+  readonly qty: number;
+  readonly uom: string;
+  readonly servings: number;
+  /** Actual cost from the lots consumed, not standard cost. */
+  readonly cost: number;
+  readonly consumed: readonly ConsumedLine[];
+  readonly lotId?: string;
+  readonly shortages: readonly Shortage[];
+  readonly minutes: number;
+}
+
+export interface ProduceOptions {
+  readonly on?: IsoDate;
+  /** Make missing sub-recipes on the spot instead of failing. Default true. */
+  readonly cascade?: boolean;
+  /** Consume ingredients that aren't in stock, recording the shortfall. Default false. */
+  readonly allowShortages?: boolean;
+  readonly includeOptional?: boolean;
+  readonly ref?: string;
+  /** Don't book the output into stock — used when a dish is eaten immediately. */
+  readonly consumeImmediately?: boolean;
+}
+
+/**
+ * Cook something: issue the components, book in the output.
+ *
+ * Sub-recipes are handled exactly as an ERP handles subassemblies. If the
+ * component is stocked and present, it is issued. If it is stocked but short,
+ * the shortfall is produced first (recursively). If it is a phantom, there is
+ * nothing to issue — we go straight through to *its* components.
+ */
+export function produce(
+  db: Database,
+  itemId: ItemId,
+  qty: number,
+  options: ProduceOptions = {},
+): ProductionResult {
+  const { cascade = true, allowShortages = false, includeOptional = false } = options;
+  const on = options.on ?? today();
+  const item = mustItem(db, itemId);
+  const recipe = recipeFor(db, itemId);
+  const ref = options.ref ?? `make:${itemId}`;
+
+  if (!recipe) {
+    throw new MiseError(`"${item.name}" has no recipe; it can only be bought.`);
+  }
+
+  const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
+  const batches = batchQty === 0 ? 0 : qty / batchQty;
+
+  const consumed: ConsumedLine[] = [];
+  const shortages: Shortage[] = [];
+  let cost = 0;
+
+  for (const component of recipe.components) {
+    if (component.optional && !includeOptional) continue;
+    const child = findItem(db, component.itemId);
+    if (!child) continue;
+
+    const scaled = component.scalable === false ? component.qty : component.qty * batches;
+    const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));
+    const need = component.lossPct ? net / (1 - component.lossPct) : net;
+    if (need <= 1e-9) continue;
+
+    // Phantom: nothing to take off a shelf, so make it inline and charge its
+    // components to this order.
+    if (!isStocked(child)) {
+      const inner = produce(db, child.id, need, {
+        ...options,
+        on,
+        ref,
+        consumeImmediately: true,
+      });
+      cost += inner.cost;
+      shortages.push(...inner.shortages);
+      consumed.push({
+        itemId: child.id,
+        name: child.name,
+        qty: need,
+        uom: child.stockUom,
+        cost: inner.cost,
+        shortfall: 0,
+        madeToOrder: true,
+      });
+      continue;
+    }
+
+    let madeToOrder = false;
+    const available = onHand(db, child.id);
+    if (available + 1e-9 < need && isMade(child) && cascade) {
+      const gap = need - available;
+      const inner = produce(db, child.id, gap, { ...options, on, ref });
+      shortages.push(...inner.shortages);
+      madeToOrder = true;
+    }
+
+    const result = issue(db, child.id, {
+      qty: need,
+      on,
+      ref,
+      allowNegative: allowShortages || options.consumeImmediately === true,
+    });
+    cost += result.cost;
+    if (result.shortfall > 1e-9) {
+      shortages.push({ itemId: child.id, name: child.name, short: result.shortfall, uom: child.stockUom });
+    }
+    consumed.push({
+      itemId: child.id,
+      name: child.name,
+      qty: need,
+      uom: child.stockUom,
+      cost: result.cost,
+      shortfall: result.shortfall,
+      madeToOrder,
+    });
+  }
+
+  const minutes = recipeMinutes(recipe);
+  const unitCost = qty > 0 ? cost / qty : 0;
+
+  let lotId: string | undefined;
+  if (!options.consumeImmediately) {
+    const lot = receive(db, itemId, {
+      qty,
+      on,
+      unitCost,
+      type: 'produce',
+      origin: ref,
+      note: `made ${qty.toFixed(0)} ${item.stockUom}`,
+    });
+    lotId = lot.id;
+  }
+
+  return {
+    itemId,
+    name: item.name,
+    qty,
+    uom: item.stockUom,
+    servings: servingsForQuantity(db, itemId, qty, item.stockUom),
+    cost,
+    consumed,
+    ...(lotId ? { lotId } : {}),
+    shortages,
+    minutes: minutes.active + minutes.passive,
+  };
+}
+
+/** Cook by portions rather than by weight. */
+export function cook(
+  db: Database,
+  itemId: ItemId,
+  servings: number,
+  options: ProduceOptions = {},
+): ProductionResult {
+  const { qty } = quantityForServings(db, itemId, servings);
+  return produce(db, itemId, qty, options);
+}
+
+/**
+ * Serve a meal: cook it if needed, then take it out of stock for good.
+ * This is what closes the loop between the plan and the pantry.
+ */
+export function serve(
+  db: Database,
+  itemId: ItemId,
+  servings: number,
+  options: ProduceOptions = {},
+): ProductionResult {
+  const on = options.on ?? today();
+  const { qty } = quantityForServings(db, itemId, servings);
+  const available = onHand(db, itemId);
+
+  let result: ProductionResult;
+  if (available + 1e-9 >= qty) {
+    result = {
+      itemId,
+      name: mustItem(db, itemId).name,
+      qty,
+      uom: mustItem(db, itemId).stockUom,
+      servings,
+      cost: 0,
+      consumed: [],
+      shortages: [],
+      minutes: 0,
+    };
+  } else {
+    result = produce(db, itemId, qty - available, { ...options, on });
+  }
+
+  // The cost of a meal is the cost of the lots it came out of, whether those
+  // were cooked a moment ago or have been sitting in the fridge since Sunday.
+  const eaten = issue(db, itemId, { qty, on, ref: `serve:${itemId}`, allowNegative: true });
+  return { ...result, qty, servings, cost: eaten.cost };
+}
+
+/** Close out an open production order by actually making it. */
+export function executeOrder(db: Database, orderId: string, options: ProduceOptions = {}): ProductionResult {
+  const order = db.productionOrders.find((o) => o.id === orderId);
+  if (!order) throw new NotFoundError('production order', orderId);
+  if (order.status === 'received') throw new MiseError(`Production order "${orderId}" is already done.`);
+  const result = produce(db, order.itemId, order.qty, { ...options, ref: orderId });
+  order.status = 'received';
+  return result;
+}
+
+/** Raise a one-off production order without running MRP. */
+export function raiseProductionOrder(
+  db: Database,
+  itemId: ItemId,
+  qty: number,
+  dueOn: IsoDate,
+): ProductionOrder {
+  const order: ProductionOrder = {
+    id: nextId('PRD', db.productionOrders),
+    itemId,
+    qty,
+    dueOn,
+    startOn: dueOn,
+    status: 'open',
+  };
+  db.productionOrders.push(order);
+  return order;
+}

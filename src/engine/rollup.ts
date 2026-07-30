@@ -1,0 +1,465 @@
+/**
+ * Recursive rollups: cost, nutrition, allergens and time.
+ *
+ * Each of these is the same shape of computation as explosion, run bottom-up
+ * instead of top-down: a made item's value is a function of its components'
+ * values, all the way to the purchased leaves where the value is known. Costing
+ * a lasagne means costing the béchamel, which means costing the roux, which
+ * means knowing the price of a block of butter.
+ *
+ * Nutrition deliberately uses the *net* quantity rather than the gross: onion
+ * peel is bought and paid for, but it is not eaten.
+ */
+
+import { conversionContext, findItem, isMade, mustItem, recipeFor } from '../domain/db.js';
+import { convert, type UomCode } from '../domain/units.js';
+import type { Database, Item, ItemId, Nutrients, Recipe } from '../domain/types.js';
+
+// ---------------------------------------------------------------------------
+// Cost
+// ---------------------------------------------------------------------------
+
+export interface UnitCost {
+  readonly itemId: ItemId;
+  /** Cost of one stock unit of this item, materials only. */
+  readonly materials: number;
+  /** Energy/overhead absorbed by making it, per stock unit. */
+  readonly overhead: number;
+  readonly total: number;
+  /** False when some purchased leaf below has no price. */
+  readonly complete: boolean;
+  /** Purchased items below here with no price attached. */
+  readonly missing: readonly ItemId[];
+}
+
+/** Price of one stock unit of a purchased item, from its pack price. */
+export function purchaseUnitCost(item: Item): number | undefined {
+  if (!item.purchase) return undefined;
+  const { packQty, packUom, packPrice } = item.purchase;
+  const qtyInStockUom = convert(packQty, packUom, item.stockUom, conversionContext(item));
+  return qtyInStockUom === 0 ? undefined : packPrice / qtyInStockUom;
+}
+
+/** Cost per stock unit, rolled recursively through every sub-recipe. */
+export function rollupUnitCost(
+  db: Database,
+  itemId: ItemId,
+  memo: Map<ItemId, UnitCost> = new Map(),
+  seen: ReadonlySet<ItemId> = new Set(),
+): UnitCost {
+  const cached = memo.get(itemId);
+  if (cached) return cached;
+
+  const item = mustItem(db, itemId);
+  const recipe = isMade(item) ? recipeFor(db, itemId) : undefined;
+
+  if (!recipe || seen.has(itemId)) {
+    const unit = purchaseUnitCost(item);
+    const result: UnitCost = {
+      itemId,
+      materials: unit ?? 0,
+      overhead: 0,
+      total: unit ?? 0,
+      complete: unit !== undefined,
+      missing: unit === undefined ? [itemId] : [],
+    };
+    memo.set(itemId, result);
+    return result;
+  }
+
+  const nextSeen = new Set(seen).add(itemId);
+  let materialsPerBatch = 0;
+  let overheadPerBatch = 0;
+  const missing = new Set<ItemId>();
+  let complete = true;
+
+  for (const component of recipe.components) {
+    const child = findItem(db, component.itemId);
+    if (!child) {
+      complete = false;
+      missing.add(component.itemId);
+      continue;
+    }
+    const childCost = rollupUnitCost(db, child.id, memo, nextSeen);
+    if (!childCost.complete) {
+      complete = false;
+      for (const id of childCost.missing) missing.add(id);
+    }
+    const net = convert(component.qty, component.uom, child.stockUom, conversionContext(child));
+    // You pay for what you buy, so cost uses the gross quantity including loss.
+    const gross = component.lossPct ? net / (1 - component.lossPct) : net;
+    // Keep the materials/overhead split intact as it propagates up the tree,
+    // so a sub-recipe's energy cost is still reported as overhead at the top.
+    materialsPerBatch += gross * childCost.materials;
+    overheadPerBatch += gross * childCost.overhead;
+  }
+
+  const minutes = recipeMinutes(recipe);
+  overheadPerBatch += ((minutes.active + minutes.passive) / 60) * db.settings.overheadPerHour;
+
+  const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
+  const perUnit = (value: number): number => (batchQty === 0 ? 0 : value / batchQty);
+
+  const result: UnitCost = {
+    itemId,
+    materials: perUnit(materialsPerBatch),
+    overhead: perUnit(overheadPerBatch),
+    total: perUnit(materialsPerBatch + overheadPerBatch),
+    complete,
+    missing: [...missing],
+  };
+  memo.set(itemId, result);
+  return result;
+}
+
+export interface CostLine {
+  readonly itemId: ItemId;
+  readonly name: string;
+  readonly qty: number;
+  readonly uom: UomCode;
+  readonly unitCost: number;
+  readonly cost: number;
+  readonly share: number;
+}
+
+export interface CostReport {
+  readonly itemId: ItemId;
+  readonly qty: number;
+  readonly uom: UomCode;
+  readonly servings: number;
+  readonly materials: number;
+  readonly overhead: number;
+  readonly total: number;
+  readonly perServing: number;
+  readonly complete: boolean;
+  readonly missing: readonly ItemId[];
+  /** Purchased leaves, biggest contributor first — where the money actually goes. */
+  readonly lines: readonly CostLine[];
+}
+
+/** Cost a specific quantity, with a leaf-level breakdown. */
+export function costOf(db: Database, itemId: ItemId, qty: number, uom?: UomCode): CostReport {
+  const item = mustItem(db, itemId);
+  const inStock = convert(qty, uom ?? item.stockUom, item.stockUom, conversionContext(item));
+  const unit = rollupUnitCost(db, itemId);
+
+  // Leaf breakdown: explode once and price the leaves.
+  const leafTotals = new Map<ItemId, number>();
+  const walk = (id: ItemId, quantity: number, seen: ReadonlySet<ItemId>): void => {
+    const current = mustItem(db, id);
+    const recipe = isMade(current) && !seen.has(id) ? recipeFor(db, id) : undefined;
+    if (!recipe) {
+      leafTotals.set(id, (leafTotals.get(id) ?? 0) + quantity);
+      return;
+    }
+    const nextSeen = new Set(seen).add(id);
+    const batchQty = convert(
+      recipe.yieldQty,
+      recipe.yieldUom,
+      current.stockUom,
+      conversionContext(current),
+    );
+    const batches = batchQty === 0 ? 0 : quantity / batchQty;
+    for (const component of recipe.components) {
+      const child = findItem(db, component.itemId);
+      if (!child) continue;
+      const scaled = component.scalable === false ? component.qty : component.qty * batches;
+      const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));
+      const gross = component.lossPct ? net / (1 - component.lossPct) : net;
+      walk(child.id, gross, nextSeen);
+    }
+  };
+  walk(itemId, inStock, new Set());
+
+  const materials = unit.materials * inStock;
+  const overhead = unit.overhead * inStock;
+  const total = materials + overhead;
+
+  const lines: CostLine[] = [...leafTotals.entries()]
+    .map(([leafId, leafQty]) => {
+      const leaf = mustItem(db, leafId);
+      const leafUnitCost = purchaseUnitCost(leaf) ?? 0;
+      const cost = leafUnitCost * leafQty;
+      return {
+        itemId: leafId,
+        name: leaf.name,
+        qty: leafQty,
+        uom: leaf.stockUom,
+        unitCost: leafUnitCost,
+        cost,
+        share: total > 0 ? cost / total : 0,
+      };
+    })
+    .sort((a, b) => b.cost - a.cost);
+
+  const recipe = recipeFor(db, itemId);
+  const servings = recipe
+    ? (inStock /
+        convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item))) *
+      recipe.servings
+    : inStock;
+
+  return {
+    itemId,
+    qty: inStock,
+    uom: item.stockUom,
+    servings,
+    materials,
+    overhead,
+    total,
+    perServing: servings > 0 ? total / servings : total,
+    complete: unit.complete,
+    missing: unit.missing,
+    lines,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Nutrition
+// ---------------------------------------------------------------------------
+
+const ZERO: Nutrients = { kcal: 0, proteinG: 0, fatG: 0, satFatG: 0, carbG: 0, sugarG: 0, fibreG: 0, sodiumMg: 0 };
+
+function addNutrients(a: Nutrients, b: Nutrients, factor: number): Nutrients {
+  return {
+    kcal: a.kcal + b.kcal * factor,
+    proteinG: a.proteinG + b.proteinG * factor,
+    fatG: a.fatG + b.fatG * factor,
+    satFatG: (a.satFatG ?? 0) + (b.satFatG ?? 0) * factor,
+    carbG: a.carbG + b.carbG * factor,
+    sugarG: (a.sugarG ?? 0) + (b.sugarG ?? 0) * factor,
+    fibreG: (a.fibreG ?? 0) + (b.fibreG ?? 0) * factor,
+    sodiumMg: (a.sodiumMg ?? 0) + (b.sodiumMg ?? 0) * factor,
+  };
+}
+
+export interface NutritionRollup {
+  /** Absolute nutrients contained in one stock unit of the item. */
+  readonly perStockUnit: Nutrients;
+  /** Grams of edible output per stock unit, for per-100 g figures. */
+  readonly gramsPerStockUnit: number;
+  readonly complete: boolean;
+  readonly missing: readonly ItemId[];
+}
+
+/** Grams of an item, if we can get there from its stock unit. */
+function gramsOf(item: Item, qty: number): number | undefined {
+  try {
+    return convert(qty, item.stockUom, 'g', conversionContext(item));
+  } catch {
+    return undefined;
+  }
+}
+
+export function rollupNutrition(
+  db: Database,
+  itemId: ItemId,
+  memo: Map<ItemId, NutritionRollup> = new Map(),
+  seen: ReadonlySet<ItemId> = new Set(),
+): NutritionRollup {
+  const cached = memo.get(itemId);
+  if (cached) return cached;
+
+  const item = mustItem(db, itemId);
+  const recipe = isMade(item) && !seen.has(itemId) ? recipeFor(db, itemId) : undefined;
+
+  if (!recipe) {
+    const grams = gramsOf(item, 1);
+    const per100 = item.nutrientsPer100g;
+    const result: NutritionRollup = {
+      perStockUnit: per100 && grams !== undefined ? addNutrients(ZERO, per100, grams / 100) : ZERO,
+      gramsPerStockUnit: grams ?? 0,
+      complete: Boolean(per100) && grams !== undefined,
+      missing: per100 && grams !== undefined ? [] : [itemId],
+    };
+    memo.set(itemId, result);
+    return result;
+  }
+
+  const nextSeen = new Set(seen).add(itemId);
+  let perBatch = ZERO;
+  let inputGrams = 0;
+  let complete = true;
+  const missing = new Set<ItemId>();
+
+  for (const component of recipe.components) {
+    const child = findItem(db, component.itemId);
+    if (!child) continue;
+    const childRollup = rollupNutrition(db, child.id, memo, nextSeen);
+    if (!childRollup.complete) {
+      complete = false;
+      for (const id of childRollup.missing) missing.add(id);
+    }
+    // Net, not gross: peel and trim are paid for but not eaten.
+    const net = convert(component.qty, component.uom, child.stockUom, conversionContext(child));
+    perBatch = addNutrients(perBatch, childRollup.perStockUnit, net);
+    inputGrams += childRollup.gramsPerStockUnit * net;
+  }
+
+  const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
+  // Output mass: prefer a declared mass yield, else assume water loss only.
+  const declaredGrams = gramsOf(item, batchQty);
+  const outputGrams = declaredGrams ?? inputGrams * (recipe.massYield ?? 1);
+
+  const scale = batchQty === 0 ? 0 : 1 / batchQty;
+  const result: NutritionRollup = {
+    perStockUnit: addNutrients(ZERO, perBatch, scale),
+    gramsPerStockUnit: batchQty === 0 ? 0 : outputGrams / batchQty,
+    complete,
+    missing: [...missing],
+  };
+  memo.set(itemId, result);
+  return result;
+}
+
+export interface NutritionFacts {
+  readonly total: Nutrients;
+  readonly perServing: Nutrients;
+  readonly per100g: Nutrients;
+  readonly servings: number;
+  readonly grams: number;
+  readonly complete: boolean;
+  readonly missing: readonly ItemId[];
+}
+
+export function nutritionOf(db: Database, itemId: ItemId, qty: number, uom?: UomCode): NutritionFacts {
+  const item = mustItem(db, itemId);
+  const inStock = convert(qty, uom ?? item.stockUom, item.stockUom, conversionContext(item));
+  const rollup = rollupNutrition(db, itemId);
+  const recipe = recipeFor(db, itemId);
+
+  const total = addNutrients(ZERO, rollup.perStockUnit, inStock);
+  const grams = rollup.gramsPerStockUnit * inStock;
+  const servings = recipe
+    ? (inStock /
+        convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item))) *
+      recipe.servings
+    : inStock;
+
+  return {
+    total,
+    perServing: addNutrients(ZERO, total, servings > 0 ? 1 / servings : 0),
+    per100g: addNutrients(ZERO, total, grams > 0 ? 100 / grams : 0),
+    servings,
+    grams,
+    complete: rollup.complete,
+    missing: rollup.missing,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Allergens
+// ---------------------------------------------------------------------------
+
+export interface AllergenHit {
+  readonly allergen: string;
+  /** Items carrying it, and whether every path to them is optional. */
+  readonly fromItems: readonly ItemId[];
+  readonly onlyOptional: boolean;
+}
+
+/** Union of allergens across the whole recipe tree, with provenance. */
+export function rollupAllergens(db: Database, itemId: ItemId): AllergenHit[] {
+  const hits = new Map<string, { items: Set<ItemId>; required: boolean }>();
+
+  const walk = (id: ItemId, optional: boolean, seen: ReadonlySet<ItemId>): void => {
+    if (seen.has(id)) return;
+    const item = findItem(db, id);
+    if (!item) return;
+    for (const allergen of item.allergens ?? []) {
+      const entry = hits.get(allergen) ?? { items: new Set<ItemId>(), required: false };
+      entry.items.add(id);
+      if (!optional) entry.required = true;
+      hits.set(allergen, entry);
+    }
+    const recipe = isMade(item) ? recipeFor(db, id) : undefined;
+    if (!recipe) return;
+    const nextSeen = new Set(seen).add(id);
+    for (const component of recipe.components) {
+      walk(component.itemId, optional || component.optional === true, nextSeen);
+    }
+  };
+
+  walk(itemId, false, new Set());
+
+  return [...hits.entries()]
+    .map(([allergen, entry]) => ({
+      allergen,
+      fromItems: [...entry.items],
+      onlyOptional: !entry.required,
+    }))
+    .sort((a, b) => a.allergen.localeCompare(b.allergen));
+}
+
+/** Which household members can't eat this, and why. */
+export function dietaryConflicts(
+  db: Database,
+  itemId: ItemId,
+): { member: string; allergens: string[] }[] {
+  const present = new Set(rollupAllergens(db, itemId).filter((h) => !h.onlyOptional).map((h) => h.allergen));
+  return db.settings.household
+    .map((member) => ({
+      member: member.name,
+      allergens: (member.avoids ?? []).filter((a) => present.has(a)),
+    }))
+    .filter((conflict) => conflict.allergens.length > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Time
+// ---------------------------------------------------------------------------
+
+export function recipeMinutes(recipe: Recipe): { active: number; passive: number } {
+  let active = 0;
+  let passive = 0;
+  for (const step of recipe.steps ?? []) {
+    active += step.activeMin ?? 0;
+    passive += step.passiveMin ?? 0;
+  }
+  return { active, passive };
+}
+
+export interface TimeRollup {
+  /** Hands-on minutes summed over every recipe in the tree. */
+  readonly activeMin: number;
+  readonly passiveMin: number;
+  /**
+   * Longest dependency chain in minutes: you cannot start the béchamel before
+   * the roux is made, so this is the earliest the dish can possibly be ready
+   * even with infinite hands.
+   */
+  readonly criticalPathMin: number;
+  /** The chain that sets the critical path, deepest-first. */
+  readonly criticalPath: readonly ItemId[];
+}
+
+export function rollupTime(db: Database, itemId: ItemId): TimeRollup {
+  let activeMin = 0;
+  let passiveMin = 0;
+
+  const longest = (id: ItemId, seen: ReadonlySet<ItemId>): { minutes: number; path: ItemId[] } => {
+    const item = findItem(db, id);
+    const recipe = item && isMade(item) && !seen.has(id) ? recipeFor(db, id) : undefined;
+    if (!recipe) return { minutes: 0, path: [id] };
+
+    const nextSeen = new Set(seen).add(id);
+    const own = recipeMinutes(recipe);
+    activeMin += own.active;
+    passiveMin += own.passive;
+
+    let best = { minutes: 0, path: [] as ItemId[] };
+    for (const component of recipe.components) {
+      const child = longest(component.itemId, nextSeen);
+      if (child.minutes > best.minutes) best = child;
+    }
+    return { minutes: own.active + own.passive + best.minutes, path: [id, ...best.path] };
+  };
+
+  const critical = longest(itemId, new Set());
+  return {
+    activeMin,
+    passiveMin,
+    criticalPathMin: critical.minutes,
+    criticalPath: critical.path,
+  };
+}

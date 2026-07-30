@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mise — recursive recipes, run like an ERP</title>
+    <link rel="stylesheet" href="/web/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🍲</text></svg>"
+    />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">mise</span>
+          <span class="brand-sub">recipe recursion, run as a home ERP</span>
+        </div>
+
+        <nav id="nav" class="nav"></nav>
+
+        <div class="sidebar-foot">
+          <button id="reset" class="ghost" type="button">Reset to seed data</button>
+          <p class="hint">
+            Everything on this page is computed live in the browser by the same
+            engine the CLI uses.
+          </p>
+        </div>
+      </aside>
+
+      <main id="main" class="main">
+        <noscript>Mise needs JavaScript: the whole engine runs client-side.</noscript>
+      </main>
+    </div>
+
+    <script type="module" src="/dist/web/app.js"></script>
+  </body>
+</html>
