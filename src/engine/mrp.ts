@@ -161,15 +161,25 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
   const problems: string[] = [];
   const consumedStock = new Map<ItemId, number>();
 
+  const horizonEnd = addDays(asOf, horizonDays - 1);
+
   for (const itemId of order) {
-    const demands = demandsByItem.get(itemId);
-    if (!demands || demands.length === 0) continue;
+    const demands = demandsByItem.get(itemId) ?? [];
+    // Orders already firmed up by a previous run. They are supply for this
+    // item *and* a source of demand for its components — see below.
+    const firmOrders = options.ignoreStock ? [] : firmProductionOrders(db, itemId, horizonEnd);
+    if (demands.length === 0 && firmOrders.length === 0) continue;
 
     const item = mustItem(db, itemId);
     const level = codes.get(itemId) ?? 0;
     const gross = demands.reduce((sum, d) => sum + d.qty, 0);
-    const dueOn = demands.reduce<IsoDate>((earliest, d) => (d.dueOn < earliest ? d.dueOn : earliest), demands[0]!.dueOn);
-    const pegging = [...new Set(demands.map((d) => d.source))];
+    const dueOn = [
+      ...demands.map((d) => d.dueOn),
+      ...firmOrders.map((o) => o.dueOn),
+    ].reduce<IsoDate>((earliest, date) => (date < earliest ? date : earliest), horizonEnd);
+    const pegging = [
+      ...new Set([...demands.map((d) => d.source), ...firmOrders.map((o) => o.id)]),
+    ];
 
     // Phantoms are never stocked and never ordered: pass demand straight down.
     if (!isStocked(item)) {
@@ -190,9 +200,10 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
     }
 
     const stock = options.ignoreStock ? 0 : Math.max(0, onHand(db, itemId) - (consumedStock.get(itemId) ?? 0));
-    const incoming = options.ignoreStock
-      ? 0
-      : onOrder(db, itemId, dueOn) + onProductionOrder(db, itemId, dueOn);
+    const firmSupply = firmOrders
+      .filter((firm) => firm.dueOn <= dueOn)
+      .reduce((sum, firm) => sum + firm.qty, 0);
+    const incoming = (options.ignoreStock ? 0 : onOrder(db, itemId, dueOn)) + firmSupply;
     const safety = item.safetyStock ?? 0;
     const net = Math.max(0, gross + safety - stock - incoming);
 
@@ -211,6 +222,13 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       uom: item.stockUom,
       action,
     });
+
+    // A firm order still has to be cooked, so its components are still needed
+    // even though it covers its own parent demand. Skipping this is what would
+    // let `mrp --commit` silently empty the shopping list.
+    for (const firm of firmOrders) {
+      explodeOneLevel(db, itemId, firm.qty, firm.startOn, level, [firm.id], addDemand, options.includeOptional);
+    }
 
     if (net <= 1e-9) continue;
 
@@ -278,18 +296,17 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
 }
 
 /**
- * Quantity already committed to be cooked and due on or before `by`.
+ * Batches already committed to be cooked, within the planning window.
  *
- * Without this, firming up a plan with `commitProduction` and then re-running
- * MRP would plan the same batch of ragù a second time.
+ * These play both roles an open works order plays in an ERP: they are supply
+ * against the demand that caused them, so the same ragù is not planned twice,
+ * and they are demand against their own components, because somebody still has
+ * to buy the mince.
  */
-function onProductionOrder(db: Database, itemId: ItemId, by: IsoDate): number {
-  let total = 0;
-  for (const order of db.productionOrders) {
-    if (order.status !== 'open' || order.itemId !== itemId || order.dueOn > by) continue;
-    total += order.qty;
-  }
-  return total;
+function firmProductionOrders(db: Database, itemId: ItemId, until: IsoDate): ProductionOrder[] {
+  return db.productionOrders.filter(
+    (order) => order.status === 'open' && order.itemId === itemId && order.dueOn <= until,
+  );
 }
 
 /**

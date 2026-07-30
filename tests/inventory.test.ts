@@ -80,7 +80,12 @@ test('sweeping writes off what is past its date and leaves the rest', () => {
   assert.equal(wasted.length, 1);
   assert.ok(close(wasted[0]!.cost, 0.5));
   assert.equal(onHand(database, 'milk'), 300);
-  assert.ok(database.ledger.some((txn) => txn.type === 'waste'));
+
+  // The ledger has to reconcile with the waste report; posting the quantity
+  // after clearing the lot would silently record a zero.
+  const waste = database.ledger.find((txn) => txn.type === 'waste');
+  assert.ok(waste);
+  assert.equal(waste.qty, -500);
 });
 
 test('open purchase orders count as supply, received ones do not', () => {

@@ -136,6 +136,48 @@ test('a committed production order stops the same batch being planned twice', ()
   assert.ok(!second.production.some((order) => order.itemId === 'dish'));
 });
 
+test('a committed production order still demands its own components', () => {
+  // A firm order is supply to its parent and demand to its children. Treating
+  // it as supply only would let `mrp --commit` quietly empty the shopping list,
+  // because every level would look covered while nothing had been bought.
+  const database = nestedDb();
+  planned(database, 'dish', 4, '2026-07-05');
+
+  const before = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const boughtBefore = before.purchases.map((line) => line.itemId).sort();
+  assert.ok(boughtBefore.length > 0, 'the fixture starts with an empty pantry');
+
+  commitProduction(database, before);
+  const after = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+
+  assert.deepEqual(
+    after.purchases.map((line) => line.itemId).sort(),
+    boughtBefore,
+    'committing what to cook must not change what has to be bought',
+  );
+  for (const itemId of boughtBefore) {
+    const cheap = before.purchases.find((line) => line.itemId === itemId)!;
+    const firm = after.purchases.find((line) => line.itemId === itemId)!;
+    assert.ok(close(firm.qty, cheap.qty), `${itemId}: ${firm.qty} vs ${cheap.qty}`);
+  }
+});
+
+test('committing twice does not double the ingredient demand', () => {
+  const database = nestedDb();
+  planned(database, 'dish', 4, '2026-07-05');
+
+  const first = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  commitProduction(database, first);
+  const second = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  commitProduction(database, second); // second run plans nothing, so nothing is added
+
+  const third = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const butterFirst = first.lines.find((line) => line.itemId === 'butter')!;
+  const butterThird = third.lines.find((line) => line.itemId === 'butter')!;
+
+  assert.ok(close(butterThird.gross, butterFirst.gross), `${butterThird.gross} vs ${butterFirst.gross}`);
+});
+
 test('replacing an item in place is seen by the next planning run', () => {
   // Guards the lookup-index cache: reassigning db.items with the same length
   // must not serve stale item definitions.

@@ -81,9 +81,14 @@ export function shoppingList(
   options: ShoppingListOptions = {},
 ): ShoppingList {
   const asOf = options.asOf ?? mrp.asOf;
+  // Pegging ids come back as meal plan entries or, once a plan is firmed up,
+  // production orders. Both resolve to something a person recognises.
   const dishNames = new Map<string, string>();
   for (const entry of db.mealPlan) {
     dishNames.set(entry.id, mustItem(db, entry.itemId).name);
+  }
+  for (const order of db.productionOrders) {
+    dishNames.set(order.id, mustItem(db, order.itemId).name);
   }
 
   const lines: ShoppingLine[] = [];

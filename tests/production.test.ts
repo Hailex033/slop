@@ -85,6 +85,34 @@ test('feasibility pools a leaf used twice before comparing against stock', () =>
   assert.ok(close(check.servings, 2, 1e-6), `100 g of butter is two servings, got ${check.servings}`);
 });
 
+test('a sub-recipe already in the fridge counts as itself, not its ingredients', () => {
+  const database = nestedDb();
+  // Everything the dish needs, but only as finished sub-recipes: no butter or
+  // flour in the house at all. `produce` would issue these happily, so
+  // feasibility must not insist on the raw ingredients behind them.
+  receive(database, 'sauce', { qty: 1000 });
+  receive(database, 'crust', { qty: 300 });
+  receive(database, 'cheese', { qty: 200 });
+
+  const check = feasibility(database, 'dish', 4);
+
+  assert.deepEqual(check.missing, []);
+  assert.ok(close(check.servings, 4, 1e-3), `got ${check.servings}`);
+});
+
+test('partial sub-recipe stock falls back to making up the difference', () => {
+  const database = nestedDb();
+  receive(database, 'sauce', { qty: 500 }); // half of what four servings need
+  receive(database, 'cheese', { qty: 200 });
+  receive(database, 'butter', { qty: 150 }); // 50 g for the missing sauce, 100 g for the crust
+  receive(database, 'flour', { qty: 250 }); // 50 g via the roux, 200 g in the crust
+
+  const check = feasibility(database, 'dish', 4);
+
+  assert.deepEqual(check.missing, [], 'the shortfall is coverable from raw ingredients');
+  assert.ok(close(check.servings, 4, 1e-3), `got ${check.servings}`);
+});
+
 test('feasibility names what is missing and by how much', () => {
   const database = nestedDb();
   receive(database, 'butter', { qty: 100 });

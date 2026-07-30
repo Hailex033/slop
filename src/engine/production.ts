@@ -15,7 +15,7 @@ import { MiseError, NotFoundError } from '../domain/errors.js';
 import { convert } from '../domain/units.js';
 import { nextId } from '../domain/ids.js';
 import type { Database, ItemId, ProductionOrder } from '../domain/types.js';
-import { aggregate, explode, quantityForServings, servingsForQuantity } from './explode.js';
+import { quantityForServings, servingsForQuantity } from './explode.js';
 import { onHand, issue, receive } from './inventory.js';
 import type { MrpResult, PlannedProduction } from './mrp.js';
 import { recipeMinutes, rollupTime } from './rollup.js';
@@ -118,51 +118,136 @@ export interface Shortage {
   readonly uom: string;
 }
 
+/** Free stock per item, as a working balance that a walk can draw down. */
+function stockBalances(db: Database): Map<ItemId, number> {
+  const balances = new Map<ItemId, number>();
+  for (const lot of db.lots) {
+    if (lot.qty > 0) balances.set(lot.itemId, (balances.get(lot.itemId) ?? 0) + lot.qty);
+  }
+  return balances;
+}
+
 /**
- * How much of something you could make from what's in the house.
+ * Net a requirement against stock at *every* level, recording what is still
+ * missing at the bottom.
  *
- * Explodes to purchased leaves first, so shared ingredients are pooled before
- * being compared against stock: a recipe using butter in two places is limited
- * by its *total* butter need, not by either line on its own.
+ * The two properties that matter, and that a plain explode-then-compare gets
+ * wrong in opposite directions:
+ *
+ *  - A sub-recipe you already have is taken off the shelf and *not* exploded.
+ *    A tub of ragù in the fridge means you do not need mince, even though a
+ *    naive explosion would insist on it.
+ *  - Stock is a shared balance drawn down as the walk proceeds, so butter
+ *    needed by two different branches is measured against one tub of butter
+ *    rather than being credited the same 100 g twice.
+ */
+function netRequirements(
+  db: Database,
+  itemId: ItemId,
+  qty: number,
+  balances: Map<ItemId, number>,
+  shortfalls: Map<ItemId, number>,
+  seen: ReadonlySet<ItemId> = new Set(),
+): void {
+  if (qty <= 1e-9) return;
+  const item = mustItem(db, itemId);
+
+  // Phantoms are never on a shelf, whatever the ledger might say.
+  const available = isStocked(item) ? (balances.get(itemId) ?? 0) : 0;
+  const taken = Math.min(available, qty);
+  if (taken > 0) balances.set(itemId, available - taken);
+
+  const remaining = qty - taken;
+  if (remaining <= 1e-9) return;
+
+  const recipe = isMade(item) && !seen.has(itemId) ? recipeFor(db, itemId) : undefined;
+  if (!recipe) {
+    shortfalls.set(itemId, (shortfalls.get(itemId) ?? 0) + remaining);
+    return;
+  }
+
+  const nextSeen = new Set(seen).add(itemId);
+  const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
+  const batches = batchQty === 0 ? 0 : remaining / batchQty;
+
+  for (const component of recipe.components) {
+    if (component.optional) continue;
+    const child = findItem(db, component.itemId);
+    if (!child) continue;
+    const scaled = component.scalable === false ? component.qty : component.qty * batches;
+    const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));
+    const gross = component.lossPct ? net / (1 - component.lossPct) : net;
+    netRequirements(db, child.id, gross, balances, shortfalls, nextSeen);
+  }
+}
+
+/** What you would still have to buy to make `servings` of something. */
+function shortfallsFor(db: Database, itemId: ItemId, servings: number): Map<ItemId, number> {
+  const shortfalls = new Map<ItemId, number>();
+  const { qty } = quantityForServings(db, itemId, servings);
+  netRequirements(db, itemId, qty, stockBalances(db), shortfalls);
+  return shortfalls;
+}
+
+/**
+ * Largest serving count that needs nothing bought.
+ *
+ * Requirements are non-decreasing in servings — fixed components stay put, the
+ * rest grow — so "needs nothing" is monotone and bisection is exact to the
+ * tolerance it runs to.
+ */
+function maxFeasibleServings(db: Database, itemId: ItemId, probe: number): number {
+  const ok = (servings: number): boolean => shortfallsFor(db, itemId, servings).size === 0;
+
+  let low = 0;
+  let high = probe;
+  if (ok(probe)) {
+    // We can already do the probe; find out how much further stock stretches.
+    low = probe;
+    high = probe * 2;
+    for (let i = 0; i < 8 && ok(high); i += 1) {
+      low = high;
+      high *= 2;
+    }
+    if (ok(high)) return high;
+  }
+
+  for (let i = 0; i < 24 && high - low > 1e-4; i += 1) {
+    const mid = (low + high) / 2;
+    if (ok(mid)) low = mid;
+    else high = mid;
+  }
+  return low;
+}
+
+/**
+ * How much of something you could make from what's in the house, counting
+ * sub-recipes you already have as the finished thing rather than insisting on
+ * their raw ingredients.
  */
 export function feasibility(db: Database, itemId: ItemId, targetServings?: number): Feasibility {
   const item = mustItem(db, itemId);
   const recipe = recipeFor(db, itemId);
-  const servingsPerBatch = recipe?.servings ?? 1;
-  const probe = targetServings ?? servingsPerBatch;
+  const probe = targetServings ?? recipe?.servings ?? 1;
 
-  const tree = explode(db, { itemId, servings: probe });
-  const requirements = aggregate(tree, { level: 'leaves', includeOptional: false });
+  const shortfalls = shortfallsFor(db, itemId, probe);
+  // The same walk against an empty pantry gives the denominator for coverage:
+  // everything this dish needs, whether or not it happens to be in.
+  const everything = new Map<ItemId, number>();
+  netRequirements(db, itemId, quantityForServings(db, itemId, probe).qty, new Map(), everything);
 
-  let ratio = Number.POSITIVE_INFINITY;
-  let have = 0;
-  const missing: Shortage[] = [];
+  const missing: Shortage[] = [...shortfalls.entries()].map(([shortId, short]) => {
+    const shortItem = mustItem(db, shortId);
+    return { itemId: shortId, name: shortItem.name, short, uom: shortItem.stockUom };
+  });
 
-  for (const requirement of requirements) {
-    const stock = onHand(db, requirement.itemId);
-    if (requirement.qty <= 1e-9) continue;
-    const covered = stock / requirement.qty;
-    ratio = Math.min(ratio, covered);
-    if (covered >= 1) {
-      have += 1;
-    } else {
-      missing.push({
-        itemId: requirement.itemId,
-        name: requirement.item.name,
-        short: requirement.qty - stock,
-        uom: requirement.uom,
-      });
-    }
-  }
-
-  if (!Number.isFinite(ratio)) ratio = 0;
   const time = rollupTime(db, itemId);
 
   return {
     itemId,
     name: item.name,
-    servings: ratio * probe,
-    coverage: requirements.length === 0 ? 0 : have / requirements.length,
+    servings: maxFeasibleServings(db, itemId, probe),
+    coverage: everything.size === 0 ? 1 : 1 - missing.length / everything.size,
     missing: missing.sort((a, b) => b.short - a.short),
     criticalPathMin: time.criticalPathMin,
   };

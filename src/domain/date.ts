@@ -10,8 +10,19 @@ export type IsoDate = string & { readonly __isoDate?: unique symbol };
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * A well-formed *and* real calendar date.
+ *
+ * The shape test alone is not enough: `Date.parse` silently rolls impossible
+ * dates forward, so `2026-02-30` would be stored as written but displayed as
+ * 2 March, and string comparisons in the meal plan would disagree with what
+ * the user sees. Requiring the parse to round-trip rejects those.
+ */
 export function isIsoDate(value: string): boolean {
-  return DATE_RE.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+  if (!DATE_RE.test(value)) return false;
+  const ms = Date.parse(`${value}T00:00:00Z`);
+  if (Number.isNaN(ms)) return false;
+  return new Date(ms).toISOString().slice(0, 10) === value;
 }
 
 export function isoDate(date: Date): IsoDate {

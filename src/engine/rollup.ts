@@ -137,19 +137,30 @@ export interface CostReport {
   readonly lines: readonly CostLine[];
 }
 
-/** Cost a specific quantity, with a leaf-level breakdown. */
+/**
+ * Cost a specific quantity, with a leaf-level breakdown.
+ *
+ * The totals are derived from the same quantity-aware walk as the breakdown
+ * rather than from scaling the per-unit rollup. That matters as soon as a
+ * recipe has a `scalable: false` component: costing two batches must charge one
+ * bay leaf, not two, and the headline figure has to agree with the lines under
+ * it. `rollupUnitCost` remains the per-unit *standard* cost, which is a
+ * linearisation and is used where a single rate is what's wanted.
+ */
 export function costOf(db: Database, itemId: ItemId, qty: number, uom?: UomCode): CostReport {
   const item = mustItem(db, itemId);
   const inStock = convert(qty, uom ?? item.stockUom, item.stockUom, conversionContext(item));
-  const unit = rollupUnitCost(db, itemId);
 
-  // Leaf breakdown: explode once and price the leaves.
   const leafTotals = new Map<ItemId, number>();
+  const missing = new Set<ItemId>();
+  let overhead = 0;
+
   const walk = (id: ItemId, quantity: number, seen: ReadonlySet<ItemId>): void => {
     const current = mustItem(db, id);
     const recipe = isMade(current) && !seen.has(id) ? recipeFor(db, id) : undefined;
     if (!recipe) {
       leafTotals.set(id, (leafTotals.get(id) ?? 0) + quantity);
+      if (purchaseUnitCost(current) === undefined) missing.add(id);
       return;
     }
     const nextSeen = new Set(seen).add(id);
@@ -160,6 +171,10 @@ export function costOf(db: Database, itemId: ItemId, qty: number, uom?: UomCode)
       conversionContext(current),
     );
     const batches = batchQty === 0 ? 0 : quantity / batchQty;
+
+    const time = recipeMinutes(recipe);
+    overhead += ((time.active + time.passive) / 60) * db.settings.overheadPerHour * batches;
+
     for (const component of recipe.components) {
       const child = findItem(db, component.itemId);
       if (!child) continue;
@@ -171,26 +186,28 @@ export function costOf(db: Database, itemId: ItemId, qty: number, uom?: UomCode)
   };
   walk(itemId, inStock, new Set());
 
-  const materials = unit.materials * inStock;
-  const overhead = unit.overhead * inStock;
-  const total = materials + overhead;
-
-  const lines: CostLine[] = [...leafTotals.entries()]
+  const priced: CostLine[] = [...leafTotals.entries()]
     .map(([leafId, leafQty]) => {
       const leaf = mustItem(db, leafId);
       const leafUnitCost = purchaseUnitCost(leaf) ?? 0;
-      const cost = leafUnitCost * leafQty;
       return {
         itemId: leafId,
         name: leaf.name,
         qty: leafQty,
         uom: leaf.stockUom,
         unitCost: leafUnitCost,
-        cost,
-        share: total > 0 ? cost / total : 0,
+        cost: leafUnitCost * leafQty,
+        share: 0,
       };
     })
     .sort((a, b) => b.cost - a.cost);
+
+  const materials = priced.reduce((sum, line) => sum + line.cost, 0);
+  const total = materials + overhead;
+  const lines: CostLine[] = priced.map((line) => ({
+    ...line,
+    share: total > 0 ? line.cost / total : 0,
+  }));
 
   const recipe = recipeFor(db, itemId);
   const servings = recipe
@@ -208,8 +225,8 @@ export function costOf(db: Database, itemId: ItemId, qty: number, uom?: UomCode)
     overhead,
     total,
     perServing: servings > 0 ? total / servings : total,
-    complete: unit.complete,
-    missing: unit.missing,
+    complete: missing.size === 0,
+    missing: [...missing],
     lines,
   };
 }

@@ -216,14 +216,17 @@ export function sweepExpired(
   const wasted: { itemId: ItemId; qty: number; cost: number }[] = [];
   for (const entry of expiring(db, -1, asOf)) {
     const { lot } = entry;
-    const cost = lot.qty * (lot.unitCost ?? 0);
-    wasted.push({ itemId: lot.itemId, qty: lot.qty, cost });
+    // Read the quantity out before clearing the lot: `entry.lot` is the same
+    // object, so anything read after the reset would post a zero to the ledger.
+    const binned = lot.qty;
+    const cost = binned * (lot.unitCost ?? 0);
+    wasted.push({ itemId: lot.itemId, qty: binned, cost });
     lot.qty = 0;
     post(db, {
       at: asOf,
       type: 'waste',
       itemId: lot.itemId,
-      qty: -entry.lot.qty,
+      qty: -binned,
       lotId: lot.id,
       note: `expired ${lot.expiresOn}`,
     });

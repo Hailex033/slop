@@ -65,6 +65,35 @@ test('overhead is absorbed per hour of cooking and stays labelled as overhead', 
   assert.ok(close(report.overhead, 2, 1e-9), `two hours at £1, got ${report.overhead}`);
 });
 
+test('the cost total agrees with its own breakdown when components are fixed', () => {
+  const database = db(
+    [purchased('base'), purchased('spice'), made('batch')],
+    [
+      recipe('batch', 100, [
+        { itemId: 'base', qty: 100, uom: 'g' },
+        // One pinch per batch, however many batches you make.
+        { itemId: 'spice', qty: 10, uom: 'g', scalable: false },
+      ]),
+    ],
+  );
+
+  const two = costOf(database, 'batch', 200, 'g');
+  const breakdown = two.lines.reduce((sum, line) => sum + line.cost, 0);
+
+  assert.ok(close(two.materials, breakdown, 1e-9), `${two.materials} vs ${breakdown}`);
+  // Two batches: 200 g of base at £0.01, plus the single 10 g of spice.
+  assert.ok(close(two.materials, 2.1, 1e-9), `got ${two.materials}`);
+  assert.ok(close(two.lines.find((l) => l.itemId === 'spice')!.qty, 10));
+});
+
+test('cost shares are taken against the same total that is reported', () => {
+  const report = costOf(nestedDb(), 'dish', 1500, 'g');
+  const shares = report.lines.reduce((sum, line) => sum + line.share, 0);
+  const materialShare = report.materials / report.total;
+
+  assert.ok(close(shares, materialShare, 1e-9), `${shares} vs ${materialShare}`);
+});
+
 test('a missing price is reported rather than silently treated as free', () => {
   const database = db(
     [purchased('priced'), purchased('unpriced', { purchase: undefined }), made('dish')],
