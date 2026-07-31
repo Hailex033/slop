@@ -45,7 +45,7 @@ expands those. That is the whole trick, and everything else falls out of it.
 ```bash
 npm install          # only @types/node and typescript, both dev-only
 npm run build
-npm test             # 115 tests, no runtime dependencies
+npm test             # 119 tests, no runtime dependencies
 
 node dist/src/cli.js init      # writes mise.db.json, seeded with a worked example
 node dist/src/cli.js tree lasagne
@@ -210,7 +210,7 @@ src/engine/       graph        low-level codes, cycles, where-used
 src/data/seed.ts  a worked example household
 src/cli.ts        the terminal front end
 web/              the browser front end, same engine
-tests/            115 tests
+tests/            119 tests
 ```
 
 The engine layer imports nothing from Node and nothing from npm, which is why

@@ -10,6 +10,7 @@ import {
   onHand,
   onOrder,
   receive,
+  stockReport,
   stockValue,
   sweepExpired,
 } from '../src/engine/inventory.js';
@@ -174,4 +175,34 @@ test('a stocktake that finds nothing wrong posts nothing', () => {
 
   assert.deepEqual(adjust(database, 'flour', 10, '2026-07-01'), []);
   assert.equal(database.ledger.length, 0);
+});
+
+test('an item with a safety level stays on the report after running out', () => {
+  const database = db([purchased('butter', { safetyStock: 100 }), purchased('flour')]);
+  receive(database, 'butter', { qty: 50, on: '2026-07-01' });
+
+  const stocked = stockReport(database, '2026-07-02');
+  assert.equal(stocked.length, 1);
+  assert.equal(stocked[0]!.belowSafety, true);
+
+  issue(database, 'butter', { qty: 50, on: '2026-07-02' });
+  const empty = stockReport(database, '2026-07-02');
+
+  assert.equal(empty.length, 1, 'it must not vanish when it matters most');
+  assert.equal(empty[0]!.item.id, 'butter');
+  assert.equal(empty[0]!.qty, 0);
+  assert.equal(empty[0]!.usable, 0);
+  assert.equal(empty[0]!.lots, 0);
+  assert.equal(empty[0]!.belowSafety, true);
+});
+
+test('items with no safety level appear only when they are actually in stock', () => {
+  const database = db([purchased('butter'), purchased('flour')]);
+  assert.deepEqual(stockReport(database, '2026-07-02'), [], 'an empty pantry is an empty report');
+
+  receive(database, 'flour', { qty: 100, on: '2026-07-01' });
+  assert.deepEqual(
+    stockReport(database, '2026-07-02').map((line) => line.item.id),
+    ['flour'],
+  );
 });

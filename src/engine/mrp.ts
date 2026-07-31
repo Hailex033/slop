@@ -406,10 +406,17 @@ function supplyFor(
     });
   }
 
+  // Inbound supply is perishable too. A delivery that lands on Tuesday with a
+  // two-day shelf life becomes a lot expiring Thursday, so it is not supply for
+  // Saturday — the window has to be closed at both ends, not just opened.
+  const spoilsOn = (arrival: IsoDate): IsoDate | undefined =>
+    item.shelfLifeDays === undefined ? undefined : addDays(arrival, item.shelfLifeDays);
+
   for (const order of db.purchaseOrders) {
     if (order.status !== 'open') continue;
     for (const line of order.lines) {
       if (line.itemId !== item.id || !item.purchase) continue;
+      const until = spoilsOn(order.expectedOn);
       buckets.push({
         qty: convert(
           line.packs * item.purchase.packQty,
@@ -418,13 +425,15 @@ function supplyFor(
           conversionContext(item),
         ),
         from: order.expectedOn,
+        ...(until ? { until } : {}),
         kind: 'order',
       });
     }
   }
 
   for (const order of firmOrders) {
-    buckets.push({ qty: order.qty, from: order.dueOn, kind: 'order' });
+    const until = spoilsOn(order.dueOn);
+    buckets.push({ qty: order.qty, from: order.dueOn, ...(until ? { until } : {}), kind: 'order' });
   }
 
   // First-expired-first-out, so the carton that is about to turn gets used

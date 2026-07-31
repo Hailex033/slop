@@ -455,13 +455,23 @@ const commands: Record<string, Command> = {
         // unit, so divide by the converted quantity, not the entered one:
         // "1 kg for £2" is £0.002 a gram, not £2 a gram.
         const inStockUnits = convert(amount, uom, item.stockUom, conversionContext(item));
+
+        let unitCost: number | undefined;
+        if (typeof cost === 'string') {
+          const total = Number(cost);
+          // A typo must not reach the ledger: NaN survives arithmetic, then
+          // serialises to null, and the pantry quietly values itself at zero.
+          if (!Number.isFinite(total) || total < 0) {
+            throw new MiseError(`--cost must be a non-negative number, not "${cost}".`);
+          }
+          if (inStockUnits > 0) unitCost = total / inStockUnits;
+        }
+
         const lot = receive(ctx.db, item.id, {
           qty: amount,
           uom,
           ...(expires ? { expiresOn: parseDate(expires) } : {}),
-          ...(typeof cost === 'string' && inStockUnits > 0
-            ? { unitCost: Number(cost) / inStockUnits }
-            : {}),
+          ...(unitCost !== undefined ? { unitCost } : {}),
         });
         ctx.dirty = true;
         out(`${f.style('✓', 'green')} ${lot.id}: ${f.qty(lot.qty, item.stockUom)} of ${item.name}` +

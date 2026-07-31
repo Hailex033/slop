@@ -7,7 +7,7 @@
  * and it is the difference between a shopping-list app and an ERP.
  */
 
-import { conversionContext, mustItem } from '../domain/db.js';
+import { conversionContext, isStocked, mustItem } from '../domain/db.js';
 import { addDays, daysBetween, today, type IsoDate } from '../domain/date.js';
 import { ShortageError } from '../domain/errors.js';
 import { nextId } from '../domain/ids.js';
@@ -365,6 +365,14 @@ export interface StockLine {
 /** Current stock, one line per item. */
 export function stockReport(db: Database, asOf: IsoDate = today()): StockLine[] {
   const byItem = new Map<ItemId, Lot[]>();
+
+  // Seed with everything that has a safety level, so an item that has run out
+  // completely still gets a line. Dropping it the moment its last lot is
+  // consumed would hide it from `--low` at exactly the point it matters most.
+  for (const item of db.items) {
+    if (item.safetyStock !== undefined && isStocked(item)) byItem.set(item.id, []);
+  }
+
   for (const lot of db.lots) {
     if (lot.qty <= 0) continue;
     const list = byItem.get(lot.itemId);

@@ -378,6 +378,54 @@ test('a perishable sub-recipe short twice is cooked twice', () => {
   assert.deepEqual(batches.map((order) => order.dueOn), ['2026-07-02', '2026-07-12']);
 });
 
+test('a delivery of a perishable stops being supply when it would spoil', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, shelfLifeDays: 2 } : item,
+  );
+  planned(database, 'cheese', 200, '2026-07-06');
+  database.purchaseOrders.push({
+    id: 'PO-0001',
+    supplierId: 'shop',
+    orderedOn: '2026-07-02',
+    expectedOn: '2026-07-02',
+    status: 'open',
+    lines: [{ itemId: 'cheese', packs: 2, unitPrice: 1 }],
+  });
+
+  const cheese = runMrp(database, { asOf: '2026-07-01', horizonDays: 14 }).lines.find(
+    (line) => line.itemId === 'cheese',
+  )!;
+
+  // Received on the 2nd it becomes a lot expiring the 4th, so it cannot feed
+  // a meal on the 6th — inbound supply is perishable too.
+  assert.equal(cheese.onOrder, 0);
+  assert.ok(close(cheese.net, 200));
+});
+
+test('a delivery that lands in time is still credited', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, shelfLifeDays: 5 } : item,
+  );
+  planned(database, 'cheese', 200, '2026-07-06');
+  database.purchaseOrders.push({
+    id: 'PO-0001',
+    supplierId: 'shop',
+    orderedOn: '2026-07-02',
+    expectedOn: '2026-07-02',
+    status: 'open',
+    lines: [{ itemId: 'cheese', packs: 2, unitPrice: 1 }],
+  });
+
+  const cheese = runMrp(database, { asOf: '2026-07-01', horizonDays: 14 }).lines.find(
+    (line) => line.itemId === 'cheese',
+  )!;
+
+  assert.ok(close(cheese.onOrder, 200), 'good until the 7th, wanted on the 6th');
+  assert.equal(cheese.action, 'covered');
+});
+
 test('the example week produces both a shopping list and a cook list', () => {
   const database = seedDatabase({ from: '2026-07-01' });
   const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
