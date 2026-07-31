@@ -208,14 +208,17 @@ function viewRecipes(): HTMLElement[] {
   const costs = new Map<ItemId, number>();
   for (const entry of db.items) {
     try {
-      costs.set(entry.id, rollupUnitCost(db, entry.id).total);
+      costs.set(entry.id, rollupUnitCost(db, entry.id, { includeOptional: state.includeOptional }).total);
     } catch {
       /* unpriceable item; the tree just shows nothing for it */
     }
   }
 
-  const cost = costOf(db, state.itemId, target.qty, target.uom);
-  const facts = nutritionOf(db, state.itemId, target.qty, target.uom);
+  // The same toggle that filters the tree filters the numbers above it, so the
+  // headline cost and calories always describe the recipe being displayed.
+  const rollupOptions = { includeOptional: state.includeOptional };
+  const cost = costOf(db, state.itemId, target.qty, target.uom, rollupOptions);
+  const facts = nutritionOf(db, state.itemId, target.qty, target.uom, rollupOptions);
   const time = rollupTime(db, state.itemId);
   const leaves = aggregate(tree, { level: 'leaves', includeOptional: state.includeOptional });
   const allergens = rollupAllergens(db, state.itemId);

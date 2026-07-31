@@ -5,7 +5,7 @@ import { onHand, receive } from '../src/engine/inventory.js';
 import { runMrp } from '../src/engine/mrp.js';
 import { packsFor, raisePurchaseOrders, shoppingList } from '../src/engine/procurement.js';
 import { cookableNow, feasibility, prepSchedule, produce, serve } from '../src/engine/production.js';
-import { ShortageError } from '../src/domain/errors.js';
+import { MiseError, ShortageError } from '../src/domain/errors.js';
 import { close, db, made, nestedDb, purchased, recipe } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -476,4 +476,27 @@ test('planning and cooking agree about how long the same job takes', () => {
   const actual = produce(database, 'loaf', planned.qty, { on: '2026-07-02' });
 
   assert.ok(close(actual.minutes, planned.minutes), `${actual.minutes} vs ${planned.minutes}`);
+});
+
+test('a run of nothing is refused before it can touch the pantry', () => {
+  const database = loafDb();
+  // A fixed component is what makes this dangerous: a zero-sized batch would
+  // still issue the pinch that does not scale.
+  database.recipes = database.recipes.map((entry) =>
+    entry.outputItemId === 'loaf'
+      ? { ...entry, components: [...entry.components, { itemId: 'salt', qty: 5, uom: 'g' as const, scalable: false }] }
+      : entry,
+  );
+  database.items = [...database.items, purchased('salt')];
+  receive(database, 'flour', { qty: 1000, on: '2026-07-01' });
+  receive(database, 'salt', { qty: 100, on: '2026-07-01' });
+  const ledgerBefore = database.ledger.length;
+
+  assert.throws(() => produce(database, 'loaf', 0, { on: '2026-07-02' }), MiseError);
+  assert.throws(() => produce(database, 'loaf', -100, { on: '2026-07-02' }), MiseError);
+  assert.throws(() => serve(database, 'loaf', 0, { on: '2026-07-02' }), MiseError);
+
+  assert.equal(onHand(database, 'salt'), 100, 'the fixed pinch stayed in the jar');
+  assert.equal(database.ledger.length, ledgerBefore, 'and nothing was posted');
+  assert.equal(onHand(database, 'loaf'), 0, 'no zero-quantity lot');
 });

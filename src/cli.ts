@@ -166,11 +166,11 @@ function targetOf(ctx: Ctx, ref: string): { itemId: ItemId; qty: number; uom: Uo
   return { itemId: item.id, qty: resolved.qty, uom: resolved.uom, servings };
 }
 
-function costMap(db: Database): Map<string, number> {
+function costMap(db: Database, includeOptional = false): Map<string, number> {
   const map = new Map<string, number>();
   for (const item of db.items) {
     try {
-      map.set(item.id, rollupUnitCost(db, item.id).total);
+      map.set(item.id, rollupUnitCost(db, item.id, { includeOptional }).total);
     } catch {
       /* leave it out of the map; the tree simply won't annotate it */
     }
@@ -242,7 +242,9 @@ const commands: Record<string, Command> = {
       out();
       out(
         f.renderTree(tree, {
-          ...(boolFlag(ctx.args, 'cost') ? { costs: costMap(ctx.db) } : {}),
+          ...(boolFlag(ctx.args, 'cost')
+            ? { costs: costMap(ctx.db, boolFlag(ctx.args, 'optional')) }
+            : {}),
           currency: ctx.db.settings.currency,
           ...(ctx.args.flags['depth'] ? { maxDepth: numberFlag(ctx.args, 'depth', 99) } : {}),
         }),
@@ -277,7 +279,7 @@ const commands: Record<string, Command> = {
         includeOptional: boolFlag(ctx.args, 'optional'),
       });
       const requirements = aggregate(tree, { level: 'leaves' });
-      const costs = costMap(ctx.db);
+      const costs = costMap(ctx.db, boolFlag(ctx.args, 'optional'));
 
       out(f.heading(`${item.name} — ingredients for ${f.num(target.servings)} servings`));
       out(
@@ -318,7 +320,7 @@ const commands: Record<string, Command> = {
   },
 
   cost: {
-    usage: 'mise cost <item> [-s servings]',
+    usage: 'mise cost <item> [-s servings] [--optional]',
     summary: 'Rolled-up cost, broken down by where the money goes.',
     group: 'recipes',
     run: (ctx) => {
@@ -326,7 +328,9 @@ const commands: Record<string, Command> = {
       if (!ref) throw new MiseError('Usage: mise cost <item>');
       const target = targetOf(ctx, ref);
       const item = mustItem(ctx.db, target.itemId);
-      const report = costOf(ctx.db, target.itemId, target.qty, target.uom);
+      const report = costOf(ctx.db, target.itemId, target.qty, target.uom, {
+        includeOptional: boolFlag(ctx.args, 'optional'),
+      });
       const currency = ctx.db.settings.currency;
 
       out(f.heading(`${item.name} — cost of ${f.qty(report.qty, report.uom)}`));
@@ -352,7 +356,7 @@ const commands: Record<string, Command> = {
   },
 
   nutrition: {
-    usage: 'mise nutrition <item> [-s servings]',
+    usage: 'mise nutrition <item> [-s servings] [--optional]',
     summary: 'Nutrition rolled up through every sub-recipe.',
     group: 'recipes',
     run: (ctx) => {
@@ -360,7 +364,9 @@ const commands: Record<string, Command> = {
       if (!ref) throw new MiseError('Usage: mise nutrition <item>');
       const target = targetOf(ctx, ref);
       const item = mustItem(ctx.db, target.itemId);
-      const facts = nutritionOf(ctx.db, target.itemId, target.qty, target.uom);
+      const facts = nutritionOf(ctx.db, target.itemId, target.qty, target.uom, {
+        includeOptional: boolFlag(ctx.args, 'optional'),
+      });
 
       out(f.heading(`${item.name} — nutrition`));
       out();

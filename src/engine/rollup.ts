@@ -15,6 +15,18 @@ import { conversionContext, findItem, isMade, mustItem, recipeFor } from '../dom
 import { convert, type UomCode } from '../domain/units.js';
 import type { Database, Item, ItemId, Nutrients, Recipe } from '../domain/types.js';
 
+/**
+ * Whether a rollup counts components marked `optional`.
+ *
+ * Defaults to **false**, matching `explode`, the shopping list and MRP: the
+ * default view of a recipe is the one you would actually make, without the
+ * garnish. Having the rollups default the other way meant the headline cost
+ * and calories described a different dish from the tree printed under them.
+ */
+export interface RollupOptions {
+  readonly includeOptional?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Cost
 // ---------------------------------------------------------------------------
@@ -41,11 +53,16 @@ export function purchaseUnitCost(item: Item): number | undefined {
 }
 
 /** Cost per stock unit, rolled recursively through every sub-recipe. */
-export function rollupUnitCost(
+export function rollupUnitCost(db: Database, itemId: ItemId, options: RollupOptions = {}): UnitCost {
+  return unitCostInner(db, itemId, options.includeOptional === true, new Map(), new Set());
+}
+
+function unitCostInner(
   db: Database,
   itemId: ItemId,
-  memo: Map<ItemId, UnitCost> = new Map(),
-  seen: ReadonlySet<ItemId> = new Set(),
+  includeOptional: boolean,
+  memo: Map<ItemId, UnitCost>,
+  seen: ReadonlySet<ItemId>,
 ): UnitCost {
   const cached = memo.get(itemId);
   if (cached) return cached;
@@ -74,13 +91,14 @@ export function rollupUnitCost(
   let complete = true;
 
   for (const component of recipe.components) {
+    if (component.optional && !includeOptional) continue;
     const child = findItem(db, component.itemId);
     if (!child) {
       complete = false;
       missing.add(component.itemId);
       continue;
     }
-    const childCost = rollupUnitCost(db, child.id, memo, nextSeen);
+    const childCost = unitCostInner(db, child.id, includeOptional, memo, nextSeen);
     if (!childCost.complete) {
       complete = false;
       for (const id of childCost.missing) missing.add(id);
@@ -147,7 +165,14 @@ export interface CostReport {
  * it. `rollupUnitCost` remains the per-unit *standard* cost, which is a
  * linearisation and is used where a single rate is what's wanted.
  */
-export function costOf(db: Database, itemId: ItemId, qty: number, uom?: UomCode): CostReport {
+export function costOf(
+  db: Database,
+  itemId: ItemId,
+  qty: number,
+  uom?: UomCode,
+  options: RollupOptions = {},
+): CostReport {
+  const includeOptional = options.includeOptional === true;
   const item = mustItem(db, itemId);
   const inStock = convert(qty, uom ?? item.stockUom, item.stockUom, conversionContext(item));
 
@@ -176,6 +201,7 @@ export function costOf(db: Database, itemId: ItemId, qty: number, uom?: UomCode)
     overhead += ((time.active + time.passive) / 60) * db.settings.overheadPerHour * batches;
 
     for (const component of recipe.components) {
+      if (component.optional && !includeOptional) continue;
       const child = findItem(db, component.itemId);
       if (!child) continue;
       const scaled = component.scalable === false ? component.qty : component.qty * batches;
@@ -271,8 +297,17 @@ function gramsOf(item: Item, qty: number): number | undefined {
 export function rollupNutrition(
   db: Database,
   itemId: ItemId,
-  memo: Map<ItemId, NutritionRollup> = new Map(),
-  seen: ReadonlySet<ItemId> = new Set(),
+  options: RollupOptions = {},
+): NutritionRollup {
+  return nutritionInner(db, itemId, options.includeOptional === true, new Map(), new Set());
+}
+
+function nutritionInner(
+  db: Database,
+  itemId: ItemId,
+  includeOptional: boolean,
+  memo: Map<ItemId, NutritionRollup>,
+  seen: ReadonlySet<ItemId>,
 ): NutritionRollup {
   const cached = memo.get(itemId);
   if (cached) return cached;
@@ -300,9 +335,10 @@ export function rollupNutrition(
   const missing = new Set<ItemId>();
 
   for (const component of recipe.components) {
+    if (component.optional && !includeOptional) continue;
     const child = findItem(db, component.itemId);
     if (!child) continue;
-    const childRollup = rollupNutrition(db, child.id, memo, nextSeen);
+    const childRollup = nutritionInner(db, child.id, includeOptional, memo, nextSeen);
     if (!childRollup.complete) {
       complete = false;
       for (const id of childRollup.missing) missing.add(id);
@@ -347,7 +383,14 @@ export interface NutritionFacts {
  * grow with the batch: two batches of a dough containing one egg contain one
  * egg, and should not report two eggs' worth of protein.
  */
-export function nutritionOf(db: Database, itemId: ItemId, qty: number, uom?: UomCode): NutritionFacts {
+export function nutritionOf(
+  db: Database,
+  itemId: ItemId,
+  qty: number,
+  uom?: UomCode,
+  options: RollupOptions = {},
+): NutritionFacts {
+  const includeOptional = options.includeOptional === true;
   const item = mustItem(db, itemId);
   const inStock = convert(qty, uom ?? item.stockUom, item.stockUom, conversionContext(item));
   const recipe = recipeFor(db, itemId);
@@ -377,6 +420,7 @@ export function nutritionOf(db: Database, itemId: ItemId, qty: number, uom?: Uom
     const batches = batchQty === 0 ? 0 : quantity / batchQty;
 
     for (const component of currentRecipe.components) {
+      if (component.optional && !includeOptional) continue;
       const child = findItem(db, component.itemId);
       if (!child) continue;
       const scaled = component.scalable === false ? component.qty : component.qty * batches;
@@ -389,7 +433,8 @@ export function nutritionOf(db: Database, itemId: ItemId, qty: number, uom?: Uom
 
   // Output mass: prefer the item's own conversion, else fall back to the
   // per-unit rollup, which knows about reduction.
-  const grams = gramsOf(item, inStock) ?? rollupNutrition(db, itemId).gramsPerStockUnit * inStock;
+  const grams =
+    gramsOf(item, inStock) ?? rollupNutrition(db, itemId, options).gramsPerStockUnit * inStock;
   const servings = recipe
     ? (inStock /
         convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item))) *

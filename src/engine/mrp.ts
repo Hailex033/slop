@@ -210,16 +210,21 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
         uom: item.stockUom,
         action: 'phantom',
       });
-      explodeOneLevel(
-        db,
-        itemId,
-        gross,
-        earliest,
-        level,
-        [...new Set([...demands.map((d) => d.source), ...firmOrders.map((o) => o.id)])],
-        addDemand,
-        options.includeOptional,
+
+      // A phantom is made fresh each time it is wanted, so it keeps for zero
+      // days: every distinct date is its own making. Collapsing them onto the
+      // earliest date would buy perishables far too early for the later meal,
+      // and would count a `scalable: false` component once for what are really
+      // several separate batches.
+      const passes = batchShortfalls(
+        [...demands]
+          .sort((a, b) => a.dueOn.localeCompare(b.dueOn))
+          .map((demand) => ({ qty: demand.qty, dueOn: demand.dueOn, source: demand.source })),
+        0,
       );
+      for (const pass of passes) {
+        explodeOneLevel(db, itemId, pass.qty, pass.dueOn, level, pass.sources, addDemand, options.includeOptional);
+      }
       continue;
     }
 

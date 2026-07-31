@@ -480,6 +480,63 @@ test('production that comfortably fits raises no conflict', () => {
   assert.deepEqual(result.conflicts, []);
 });
 
+test('a phantom needed on two dates carries each date down to its ingredients', () => {
+  const database = nestedDb();
+  // The sauce keeps two days, so its two meals are two separate cookings, each
+  // needing its own roux. Butter is perishable here so that the two resulting
+  // demands stay visible as two orders rather than merging — a keeping
+  // ingredient would rightly be bought once.
+  database.items = database.items.map((item) => {
+    if (item.id === 'sauce') return { ...item, shelfLifeDays: 2 };
+    if (item.id === 'butter') return { ...item, shelfLifeDays: 3 };
+    return item;
+  });
+  planned(database, 'sauce', 1000, '2026-07-02');
+  planned(database, 'sauce', 1000, '2026-07-20');
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 30 });
+  const butter = result.purchases.filter((line) => line.itemId === 'butter');
+
+  assert.equal(butter.length, 2, 'the roux is made twice, so butter is wanted twice');
+  assert.deepEqual(butter.map((line) => line.neededOn), ['2026-07-02', '2026-07-20']);
+});
+
+test('a fixed component under a phantom is counted once per making', () => {
+  const database = nestedDb();
+  database.items = [
+    ...database.items,
+    { id: 'salt', name: 'salt', category: 'Test', sourcing: 'purchased', stockUom: 'g',
+      purchase: { supplierId: 'shop', packQty: 100, packUom: 'g', packPrice: 1, leadTimeDays: 0 } },
+  ];
+  database.items = database.items.map((item) =>
+    item.id === 'sauce' ? { ...item, shelfLifeDays: 2 } : item,
+  );
+  database.recipes = database.recipes.map((recipe) =>
+    recipe.outputItemId === 'roux'
+      ? { ...recipe, components: [...recipe.components, { itemId: 'salt', qty: 5, uom: 'g' as const, scalable: false }] }
+      : recipe,
+  );
+  planned(database, 'sauce', 1000, '2026-07-02');
+  planned(database, 'sauce', 1000, '2026-07-20');
+
+  const salt = runMrp(database, { asOf: '2026-07-01', horizonDays: 30 }).lines.find(
+    (line) => line.itemId === 'salt',
+  )!;
+
+  // Two separate rouxs, each needing its own fixed pinch.
+  assert.ok(close(salt.gross, 10), `got ${salt.gross}`);
+});
+
+test('a phantom needed once is still exploded once', () => {
+  const database = nestedDb();
+  planned(database, 'sauce', 1000, '2026-07-02');
+
+  const butter = runMrp(database, { asOf: '2026-07-01', horizonDays: 30 }).purchases.filter(
+    (line) => line.itemId === 'butter',
+  );
+  assert.equal(butter.length, 1);
+});
+
 test('the example week produces both a shopping list and a cook list', () => {
   const database = seedDatabase({ from: '2026-07-01' });
   const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });

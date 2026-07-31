@@ -358,6 +358,13 @@ export function produce(
   qty: number,
   options: ProduceOptions = {},
 ): ProductionResult {
+  // A run of nothing is not a run. Without this a zero-sized batch would still
+  // issue every `scalable: false` component — the pinch of salt that does not
+  // scale — and book a zero-quantity lot and ledger receipt for output nobody
+  // asked for.
+  if (!(qty > 0)) {
+    throw new MiseError(`Cannot make ${qty} ${mustItem(db, itemId).stockUom} of "${mustItem(db, itemId).name}".`);
+  }
   // The outermost call owns the rollback boundary; the recursion below calls
   // `produceInner` directly so a cascade is undone as one unit with its parent.
   return transactionally(db, () => produceInner(db, itemId, qty, options));
@@ -501,6 +508,9 @@ export function serve(
   servings: number,
   options: ProduceOptions = {},
 ): ProductionResult {
+  if (!(servings > 0)) {
+    throw new MiseError(`Cannot serve ${servings} of "${mustItem(db, itemId).name}".`);
+  }
   // Cook-and-eat is one operation: if the cooking fails, the ingredients it
   // had already taken go back on the shelf, exactly as for `produce`.
   return transactionally(db, () => serveInner(db, itemId, servings, options));

@@ -45,7 +45,7 @@ expands those. That is the whole trick, and everything else falls out of it.
 ```bash
 npm install          # only @types/node and typescript, both dev-only
 npm run build
-npm test             # 136 tests, no runtime dependencies
+npm test             # 141 tests, no runtime dependencies
 
 node dist/src/cli.js init      # writes mise.db.json, seeded with a worked example
 node dist/src/cli.js tree lasagne
@@ -79,7 +79,14 @@ peeled onion needs 222 g of onion bought. Loss applies to procurement and to
 cost, but *not* to nutrition — you pay for the peel and you do not eat it.
 
 **Fixed components don't scale.** Doubling the batch does not double the bay
-leaf. Components marked `scalable: false` pass through unmultiplied.
+leaf. Components marked `scalable: false` pass through unmultiplied — and a
+dish cooked twice needs that pinch twice, so each separate making counts it
+again.
+
+**Optional means optional, everywhere.** Explosion, the shopping list, MRP,
+cost and nutrition all exclude `optional` components by default, so the
+headline figures always describe the same dish as the tree beneath them. Pass
+`--optional` to include them.
 
 **Phantoms are structural, not stocked.** Nobody keeps a tub of soffritto in the
 fridge. It is a genuine sub-recipe with genuine structure, but explosion always
@@ -178,8 +185,8 @@ the dish out of stock → the next `mrp` sees the new position.
 | `tree <item> [-s n] [--cost] [--stop x,y]` | Full recursive explosion |
 | `ingredients <item> [-s n]` | Flat, aggregated, pooled across paths |
 | `where-used <item>` | Reverse explosion |
-| `cost <item> [-s n]` | Rolled-up cost, by where the money goes |
-| `nutrition <item> [-s n]` | Nutrition and allergens through every sub-recipe |
+| `cost <item> [-s n] [--optional]` | Rolled-up cost, by where the money goes |
+| `nutrition <item> [-s n] [--optional]` | Nutrition and allergens through every sub-recipe |
 | `scale <item> -s n` | Rewrite a recipe for a different number of people |
 | **Pantry** | |
 | `stock [--expiring n] [--low]` | Lot-level stock, value, expiry |
@@ -214,7 +221,7 @@ src/engine/       graph        low-level codes, cycles, where-used
 src/data/seed.ts  a worked example household
 src/cli.ts        the terminal front end
 web/              the browser front end, same engine
-tests/            136 tests
+tests/            141 tests
 ```
 
 The engine layer imports nothing from Node and nothing from npm, which is why

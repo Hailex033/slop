@@ -162,6 +162,39 @@ test('nutrition does not scale a fixed component with the batch', () => {
   assert.ok(close(nutritionOf(database, 'batch', 200, 'g').total.kcal, 300, 1e-9));
 });
 
+test('rollups exclude optional components by default, like everything else', () => {
+  const database = db(
+    [
+      purchased('base', { nutrientsPer100g: { kcal: 100, proteinG: 0, fatG: 0, carbG: 0 } }),
+      purchased('garnish', { nutrientsPer100g: { kcal: 500, proteinG: 0, fatG: 0, carbG: 0 } }),
+      made('dish', { densityGPerMl: 1 }),
+    ],
+    [
+      recipe('dish', 100, [
+        { itemId: 'base', qty: 100, uom: 'g' },
+        { itemId: 'garnish', qty: 100, uom: 'g', optional: true },
+      ]),
+    ],
+  );
+
+  // The default has to describe the same dish the tree and the shopping list do.
+  const plain = costOf(database, 'dish', 100, 'g');
+  assert.ok(close(plain.total, 1, 1e-9), `got ${plain.total}`);
+  assert.ok(!plain.lines.some((line) => line.itemId === 'garnish'));
+  assert.ok(close(nutritionOf(database, 'dish', 100, 'g').total.kcal, 100, 1e-9));
+
+  const garnished = costOf(database, 'dish', 100, 'g', { includeOptional: true });
+  assert.ok(close(garnished.total, 2, 1e-9));
+  assert.ok(garnished.lines.some((line) => line.itemId === 'garnish'));
+  assert.ok(
+    close(nutritionOf(database, 'dish', 100, 'g', { includeOptional: true }).total.kcal, 600, 1e-9),
+  );
+
+  // And the per-unit standard rate agrees with whichever view is asked for.
+  assert.ok(close(rollupUnitCost(database, 'dish').total, 0.01, 1e-9));
+  assert.ok(close(rollupUnitCost(database, 'dish', { includeOptional: true }).total, 0.02, 1e-9));
+});
+
 test('allergens union across the whole tree, flagging optional-only paths', () => {
   const database = db(
     [
