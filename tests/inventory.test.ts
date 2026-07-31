@@ -9,10 +9,12 @@ import {
   issue,
   onHand,
   onOrder,
+  isUsableOn,
   receive,
   stockReport,
   stockValue,
   sweepExpired,
+  usableLots,
 } from '../src/engine/inventory.js';
 import { close, db, purchased } from './helpers.js';
 
@@ -225,4 +227,25 @@ test('back-dating an issue to after the receipt is still fine', () => {
   receive(database, 'flour', { qty: 500, on: '2026-07-01' });
   // Recording on Friday that you cooked on Wednesday, with stock in since Monday.
   assert.equal(issue(database, 'flour', { qty: 100, on: '2026-07-03' }).issued, 100);
+});
+
+test('every availability path applies the same usability rule', () => {
+  // These four used to decide "is this lot usable" separately, and drifted.
+  const database = db([purchased('butter', { safetyStock: 100 })]);
+  receive(database, 'butter', { qty: 500, on: '2026-07-10' });
+
+  const asOf = '2026-07-01';
+  assert.equal(isUsableOn(database.lots[0]!, asOf), false);
+  assert.equal(availableOn(database, 'butter', asOf), 0);
+  assert.equal(usableLots(database, 'butter', asOf).length, 0);
+  assert.equal(stockReport(database, asOf)[0]!.usable, 0);
+  assert.equal(stockReport(database, asOf)[0]!.belowSafety, true, 'the buffer is not covered yet');
+
+  // ...and all four agree once it has landed.
+  const later = '2026-07-10';
+  assert.equal(isUsableOn(database.lots[0]!, later), true);
+  assert.equal(availableOn(database, 'butter', later), 500);
+  assert.equal(usableLots(database, 'butter', later).length, 1);
+  assert.equal(stockReport(database, later)[0]!.usable, 500);
+  assert.equal(stockReport(database, later)[0]!.belowSafety, false);
 });

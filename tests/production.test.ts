@@ -401,3 +401,79 @@ test('a single-batch run is unchanged', () => {
   assert.ok(close(run.minutes, 300));
   assert.equal(run.startOn, '2026-07-20', 'five hours fits in the day it is due');
 });
+
+// ---------------------------------------------------------------------------
+// Cooking is not the same question as eating
+// ---------------------------------------------------------------------------
+
+function loafDb() {
+  const database = db(
+    [
+      purchased('flour', {
+        purchase: { supplierId: 'shop', packQty: 1000, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+      }),
+      made('loaf'),
+    ],
+    [
+      recipe('loaf', 100, [{ itemId: 'flour', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'work', activeMin: 30 }, { text: 'rest', passiveMin: 60 }],
+      }),
+    ],
+  );
+  return database;
+}
+
+test('a finished dish in the tin does not make it cookable', () => {
+  const database = loafDb();
+  // Four loaves baked, not a gram of flour left.
+  receive(database, 'loaf', { qty: 400, on: '2026-07-01' });
+
+  assert.deepEqual(
+    cookableNow(database, 1, '2026-07-02'),
+    [],
+    'you cannot cook a loaf out of a loaf',
+  );
+  // The dish is still there to be eaten — that is a different question.
+  assert.equal(onHand(database, 'loaf'), 400);
+});
+
+test('ingredients in the house do make it cookable', () => {
+  const database = loafDb();
+  receive(database, 'flour', { qty: 400, on: '2026-07-01' });
+
+  const options = cookableNow(database, 1, '2026-07-02');
+  assert.equal(options.length, 1);
+  assert.ok(close(options[0]!.servings, 4, 1e-3));
+});
+
+test('cooking without forcing refuses when the ingredients are gone', () => {
+  const database = loafDb();
+  receive(database, 'loaf', { qty: 400, on: '2026-07-01' });
+
+  // This is what the web Cook button now does.
+  assert.throws(() => produce(database, 'loaf', 100, { on: '2026-07-02' }), ShortageError);
+  assert.equal(onHand(database, 'loaf'), 400, 'no lot conjured out of nothing');
+});
+
+test('cooking reports the duration of the run, not of one batch', () => {
+  const database = loafDb();
+  receive(database, 'flour', { qty: 5000, on: '2026-07-01' });
+
+  const result = produce(database, 'loaf', 500, { on: '2026-07-02' });
+  // Five batches: 5 x 30 minutes hands-on, plus one 60-minute rest.
+  assert.ok(close(result.minutes, 210), `got ${result.minutes}`);
+});
+
+test('planning and cooking agree about how long the same job takes', () => {
+  // The two used to compute this separately and drift apart.
+  const database = loafDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-20', slot: 'dinner', itemId: 'loaf', servings: 5 });
+  const planned = runMrp(database, { asOf: '2026-07-01', horizonDays: 30 }).production.find(
+    (order) => order.itemId === 'loaf',
+  )!;
+
+  receive(database, 'flour', { qty: 5000, on: '2026-07-01' });
+  const actual = produce(database, 'loaf', planned.qty, { on: '2026-07-02' });
+
+  assert.ok(close(actual.minutes, planned.minutes), `${actual.minutes} vs ${planned.minutes}`);
+});

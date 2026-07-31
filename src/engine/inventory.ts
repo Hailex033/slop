@@ -20,19 +20,25 @@ export function lotsOf(db: Database, itemId: ItemId): Lot[] {
 }
 
 /**
- * Lots you could actually put your hands on that day.
+ * Can this lot be put to use on `asOf`?
  *
- * Bounded at both ends: a lot is no use before it was received, and no use
- * after it expires. It is good through its expiry date itself, and an undated
- * lot never expires. Back-dating a receipt or an issue is still fine — what
- * this rules out is consuming stock earlier than the day it arrived, which
- * `availableOn`, `issue` and feasibility would otherwise allow even though MRP
- * would not.
+ * Bounded at both ends: no use before it was received, no use after it
+ * expires. Good through its expiry date itself; an undated lot never expires.
+ * Back-dating a receipt or an issue is still fine — what this rules out is
+ * consuming stock earlier than the day it arrived.
+ *
+ * **This is the only place that decision is made.** Every availability path —
+ * issuing, planning, feasibility, the pantry report — goes through here,
+ * because when the same rule was written out at each call site the copies
+ * drifted apart twice.
  */
+export function isUsableOn(lot: Lot, asOf: IsoDate): boolean {
+  return lot.qty > 0 && lot.receivedOn <= asOf && (!lot.expiresOn || lot.expiresOn >= asOf);
+}
+
+/** Lots you could actually put your hands on that day. */
 export function usableLots(db: Database, itemId: ItemId, asOf: IsoDate): Lot[] {
-  return lotsOf(db, itemId).filter(
-    (lot) => lot.receivedOn <= asOf && (!lot.expiresOn || lot.expiresOn >= asOf),
-  );
+  return db.lots.filter((lot) => lot.itemId === itemId && isUsableOn(lot, asOf));
 }
 
 /**
@@ -392,9 +398,7 @@ export function stockReport(db: Database, asOf: IsoDate = today()): StockLine[] 
     .map(([itemId, lots]) => {
       const item = mustItem(db, itemId);
       const qty = lots.reduce((sum, lot) => sum + lot.qty, 0);
-      const usable = lots
-        .filter((lot) => !lot.expiresOn || lot.expiresOn >= asOf)
-        .reduce((sum, lot) => sum + lot.qty, 0);
+      const usable = lots.filter((lot) => isUsableOn(lot, asOf)).reduce((sum, lot) => sum + lot.qty, 0);
       const expiries = lots.map((lot) => lot.expiresOn).filter((d): d is IsoDate => Boolean(d)).sort();
       return {
         item,

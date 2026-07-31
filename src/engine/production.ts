@@ -16,9 +16,9 @@ import { convert } from '../domain/units.js';
 import { nextId } from '../domain/ids.js';
 import type { Database, ItemId, ProductionOrder } from '../domain/types.js';
 import { quantityForServings, servingsForQuantity } from './explode.js';
-import { availableOn, issue, receive, transactionally } from './inventory.js';
+import { availableOn, isUsableOn, issue, receive, transactionally } from './inventory.js';
 import type { MrpResult, PlannedProduction } from './mrp.js';
-import { recipeMinutes, rollupTime } from './rollup.js';
+import { rollupTime, runMinutes } from './rollup.js';
 
 // ---------------------------------------------------------------------------
 // Scheduling
@@ -128,9 +128,7 @@ export interface Shortage {
 function stockBalances(db: Database, asOf: IsoDate): Map<ItemId, number> {
   const balances = new Map<ItemId, number>();
   for (const lot of db.lots) {
-    if (lot.qty <= 0) continue;
-    if (lot.receivedOn > asOf) continue;
-    if (lot.expiresOn && lot.expiresOn < asOf) continue;
+    if (!isUsableOn(lot, asOf)) continue;
     balances.set(lot.itemId, (balances.get(lot.itemId) ?? 0) + lot.qty);
   }
   return balances;
@@ -196,10 +194,17 @@ function shortfallsFor(
   itemId: ItemId,
   servings: number,
   asOf: IsoDate,
+  fromScratch = false,
 ): Map<ItemId, number> {
   const shortfalls = new Map<ItemId, number>();
   const { qty } = quantityForServings(db, itemId, servings);
-  netRequirements(db, itemId, qty, stockBalances(db, asOf), shortfalls);
+  const balances = stockBalances(db, asOf);
+  // "Can I cook this?" is a different question from "can I put it on a plate?"
+  // A tin of soup in the cupboard answers the second and not the first, so for
+  // cooking we ignore any finished stock of the dish itself and price the job
+  // from its ingredients.
+  if (fromScratch) balances.delete(itemId);
+  netRequirements(db, itemId, qty, balances, shortfalls);
   return shortfalls;
 }
 
@@ -210,8 +215,15 @@ function shortfallsFor(
  * rest grow — so "needs nothing" is monotone and bisection is exact to the
  * tolerance it runs to.
  */
-function maxFeasibleServings(db: Database, itemId: ItemId, probe: number, asOf: IsoDate): number {
-  const ok = (servings: number): boolean => shortfallsFor(db, itemId, servings, asOf).size === 0;
+function maxFeasibleServings(
+  db: Database,
+  itemId: ItemId,
+  probe: number,
+  asOf: IsoDate,
+  fromScratch: boolean,
+): number {
+  const ok = (servings: number): boolean =>
+    shortfallsFor(db, itemId, servings, asOf, fromScratch).size === 0;
 
   let low = 0;
   let high = probe;
@@ -244,12 +256,13 @@ export function feasibility(
   itemId: ItemId,
   targetServings?: number,
   asOf: IsoDate = today(),
+  fromScratch = false,
 ): Feasibility {
   const item = mustItem(db, itemId);
   const recipe = recipeFor(db, itemId);
   const probe = targetServings ?? recipe?.servings ?? 1;
 
-  const shortfalls = shortfallsFor(db, itemId, probe, asOf);
+  const shortfalls = shortfallsFor(db, itemId, probe, asOf, fromScratch);
   // The same walk against an empty pantry gives the denominator for coverage:
   // everything this dish needs, whether or not it happens to be in.
   const everything = new Map<ItemId, number>();
@@ -265,7 +278,7 @@ export function feasibility(
   return {
     itemId,
     name: item.name,
-    servings: maxFeasibleServings(db, itemId, probe, asOf),
+    servings: maxFeasibleServings(db, itemId, probe, asOf, fromScratch),
     coverage: everything.size === 0 ? 1 : 1 - missing.length / everything.size,
     missing: missing.sort((a, b) => b.short - a.short),
     criticalPathMin: time.criticalPathMin,
@@ -276,7 +289,7 @@ export function feasibility(
 export function cookableNow(db: Database, minServings = 1, asOf: IsoDate = today()): Feasibility[] {
   return db.items
     .filter((item) => isMade(item) && isStocked(item) && recipeFor(db, item.id))
-    .map((item) => feasibility(db, item.id, undefined, asOf))
+    .map((item) => feasibility(db, item.id, undefined, asOf, true))
     .filter((result) => result.servings >= minServings)
     .sort((a, b) => b.servings - a.servings || a.criticalPathMin - b.criticalPathMin);
 }
@@ -285,7 +298,7 @@ export function cookableNow(db: Database, minServings = 1, asOf: IsoDate = today
 export function almostCookable(db: Database, maxMissing = 2, asOf: IsoDate = today()): Feasibility[] {
   return db.items
     .filter((item) => isMade(item) && isStocked(item) && recipeFor(db, item.id))
-    .map((item) => feasibility(db, item.id, undefined, asOf))
+    .map((item) => feasibility(db, item.id, undefined, asOf, true))
     .filter((result) => result.servings < 1 && result.missing.length > 0 && result.missing.length <= maxMissing)
     .sort((a, b) => a.missing.length - b.missing.length || b.coverage - a.coverage);
 }
@@ -435,7 +448,9 @@ function produceInner(
     });
   }
 
-  const minutes = recipeMinutes(recipe);
+  // The same per-run timing planning uses, so `mise cook` and `mise prep`
+  // never disagree about how long the same job takes.
+  const minutes = runMinutes(recipe, batches);
   const unitCost = qty > 0 ? cost / qty : 0;
 
   let lotId: string | undefined;
@@ -461,7 +476,7 @@ function produceInner(
     consumed,
     ...(lotId ? { lotId } : {}),
     shortages,
-    minutes: minutes.active + minutes.passive,
+    minutes: minutes.total,
   };
 }
 

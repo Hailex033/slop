@@ -32,7 +32,7 @@ import type { Database, Item, ItemId, MealPlanEntry, ProductionOrder } from '../
 import { quantityForServings } from './explode.js';
 import { lowLevelCodes } from './graph.js';
 import { availableOn } from './inventory.js';
-import { recipeMinutes } from './rollup.js';
+import { runMinutes } from './rollup.js';
 
 /** Hours in a day you can realistically be cooking. Used for backward scheduling. */
 const COOKING_MINUTES_PER_DAY = 8 * 60;
@@ -269,18 +269,10 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
         continue;
       }
       const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
-      const perBatch = recipeMinutes(recipe);
-
       for (const run of runs) {
-        // Timing is per *run*, not per batch. Hands-on work scales with the
-        // number of batches — you have to brown twenty lots of mince twenty
-        // times — while unattended time does not, because batches prove and
-        // simmer alongside each other. Treating a twenty-batch run as a
-        // one-batch job understates the day by hours.
+        // Timing is per *run*, not per batch — see `runMinutes`.
         const batches = batchQty === 0 ? 0 : run.qty / batchQty;
-        const activeMin = perBatch.active * batches;
-        const passiveMin = perBatch.passive;
-        const minutes = activeMin + passiveMin;
+        const { active: activeMin, passive: passiveMin, total: minutes } = runMinutes(recipe, batches);
 
         // Backward-schedule against a usable cooking day. A four-hour braise
         // still finishes the same day; an overnight prove does not.

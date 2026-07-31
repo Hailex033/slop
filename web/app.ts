@@ -553,7 +553,10 @@ function viewCook(): HTMLElement[] {
       type: 'button',
       onclick: () => {
         try {
-          const result = cook(state.db, itemId, servings, { allowShortages: true });
+          // No forced shortages: if the ingredients are not there this throws
+          // and rolls back, rather than booking a lot out of nothing and
+          // reporting it as cooked.
+          const result = cook(state.db, itemId, servings);
           state.flash = `Made ${num(result.servings)} servings of ${result.name} for ${cash(result.cost)}. Ingredients issued from stock.`;
           persist();
         } catch (error) {

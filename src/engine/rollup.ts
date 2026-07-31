@@ -469,6 +469,24 @@ export function dietaryConflicts(
 // Time
 // ---------------------------------------------------------------------------
 
+/**
+ * Wall-clock minutes for a run of `batches` of a recipe.
+ *
+ * Hands-on time scales with the batch count — twenty lots of mince have to be
+ * browned twenty times — while unattended time does not, because batches prove
+ * and simmer alongside one another. Planning and execution both call this, so
+ * `mise prep` and `mise cook` cannot report different days' work for the same
+ * job.
+ */
+export function runMinutes(
+  recipe: Recipe,
+  batches: number,
+): { active: number; passive: number; total: number } {
+  const perBatch = recipeMinutes(recipe);
+  const active = perBatch.active * batches;
+  return { active, passive: perBatch.passive, total: active + perBatch.passive };
+}
+
 export function recipeMinutes(recipe: Recipe): { active: number; passive: number } {
   let active = 0;
   let passive = 0;
