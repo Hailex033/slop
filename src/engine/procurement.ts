@@ -187,20 +187,29 @@ export function raisePurchaseOrders(
 ): PurchaseOrder[] {
   // One order per *trip*, not per supplier. Two visits to the same market on
   // different Saturdays are two orders arriving on two different days, and
-  // collapsing them would misdate one of them.
-  const trips = new Map<string, { supplierId: SupplierId; orderBy: IsoDate; lines: ShoppingLine[] }>();
+  // collapsing them would misdate one of them. Lead time is part of the key
+  // too, because an order carries a single arrival date and MRP scheduled
+  // each line against its own item's lead time — reading the supplier default
+  // here instead would commit a same-day item as arriving three days late.
+  interface Trip {
+    supplierId: SupplierId;
+    orderBy: IsoDate;
+    leadTimeDays: number;
+    lines: ShoppingLine[];
+  }
+
+  const trips = new Map<string, Trip>();
   for (const line of list.lines) {
     if (!line.supplierId || line.packs <= 0) continue;
-    const key = `${line.supplierId}@${line.orderBy}`;
+    const leadTimeDays = leadTimeFor(db, line.itemId);
+    const key = `${line.supplierId}@${line.orderBy}@${leadTimeDays}`;
     const trip = trips.get(key);
     if (trip) trip.lines.push(line);
-    else trips.set(key, { supplierId: line.supplierId, orderBy: line.orderBy, lines: [line] });
+    else trips.set(key, { supplierId: line.supplierId, orderBy: line.orderBy, leadTimeDays, lines: [line] });
   }
 
   const created: PurchaseOrder[] = [];
   for (const trip of [...trips.values()].sort((a, b) => a.orderBy.localeCompare(b.orderBy))) {
-    const supplier = findSupplier(db, trip.supplierId);
-    const leadTime = supplier?.leadTimeDays ?? 0;
     // The shopping line already worked out the first day this supplier can
     // actually be visited. Stamping the order with today + lead time instead
     // would claim delivery on a day the shop is shut, and the next planning
@@ -210,7 +219,7 @@ export function raisePurchaseOrders(
       id: nextId('PO', [...db.purchaseOrders, ...created]),
       supplierId: trip.supplierId,
       orderedOn,
-      expectedOn: addDays(orderedOn, leadTime),
+      expectedOn: addDays(orderedOn, trip.leadTimeDays),
       status: 'open',
       lines: trip.lines.map((line) => ({
         itemId: line.itemId,
@@ -222,6 +231,19 @@ export function raisePurchaseOrders(
     db.purchaseOrders.push(order);
   }
   return created;
+}
+
+/**
+ * Lead time for an item.
+ *
+ * Deliberately reads the item's own purchase terms and nothing else, because
+ * that is exactly what MRP schedules the trip against. An item with no purchase
+ * terms has no supplier either, so there is nothing to fall back to. Taking the
+ * supplier's default here instead is what let a same-day item be committed as
+ * arriving three days after the meal it was planned for.
+ */
+export function leadTimeFor(db: Database, itemId: ItemId): number {
+  return mustItem(db, itemId).purchase?.leadTimeDays ?? 0;
 }
 
 export interface ReceiptResult {

@@ -315,6 +315,69 @@ test('a delivery is supply only from the day it arrives', () => {
   assert.equal(result.purchases.find((line) => line.itemId === 'cheese')!.neededOn, '2026-07-02');
 });
 
+test('a perishable short on two distant dates becomes two shopping trips', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, shelfLifeDays: 2 } : item,
+  );
+  planned(database, 'cheese', 100, '2026-07-02');
+  planned(database, 'cheese', 100, '2026-07-06');
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 14 });
+  const buys = result.purchases.filter((line) => line.itemId === 'cheese');
+
+  assert.equal(buys.length, 2, 'one trip cannot cover both meals');
+  assert.deepEqual(buys.map((line) => line.neededOn), ['2026-07-02', '2026-07-06']);
+  assert.ok(close(buys[0]!.qty, 100));
+  assert.ok(close(buys[1]!.qty, 100));
+});
+
+test('shortfalls within the shelf life are still bought in one go', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, shelfLifeDays: 7 } : item,
+  );
+  planned(database, 'cheese', 100, '2026-07-02');
+  planned(database, 'cheese', 100, '2026-07-06');
+
+  const buys = runMrp(database, { asOf: '2026-07-01', horizonDays: 14 }).purchases.filter(
+    (line) => line.itemId === 'cheese',
+  );
+
+  assert.equal(buys.length, 1, 'it keeps long enough to buy once');
+  assert.ok(close(buys[0]!.qty, 200));
+  assert.equal(buys[0]!.neededOn, '2026-07-02');
+});
+
+test('an item with no shelf life is always bought in one go', () => {
+  const database = nestedDb();
+  planned(database, 'cheese', 100, '2026-07-02');
+  planned(database, 'cheese', 100, '2026-08-20');
+
+  const buys = runMrp(database, { asOf: '2026-07-01', horizonDays: 90 }).purchases.filter(
+    (line) => line.itemId === 'cheese',
+  );
+
+  assert.equal(buys.length, 1);
+  assert.ok(close(buys[0]!.qty, 200));
+});
+
+test('a perishable sub-recipe short twice is cooked twice', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'sauce' ? { ...item, shelfLifeDays: 3 } : item,
+  );
+  planned(database, 'sauce', 1000, '2026-07-02');
+  planned(database, 'sauce', 1000, '2026-07-12');
+
+  const batches = runMrp(database, { asOf: '2026-07-01', horizonDays: 20 }).production.filter(
+    (order) => order.itemId === 'sauce',
+  );
+
+  assert.equal(batches.length, 2, 'you cannot cook the 12th’s sauce on the 2nd');
+  assert.deepEqual(batches.map((order) => order.dueOn), ['2026-07-02', '2026-07-12']);
+});
+
 test('the example week produces both a shopping list and a cook list', () => {
   const database = seedDatabase({ from: '2026-07-01' });
   const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });

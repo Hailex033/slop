@@ -45,7 +45,7 @@ expands those. That is the whole trick, and everything else falls out of it.
 ```bash
 npm install          # only @types/node and typescript, both dev-only
 npm run build
-npm test             # 109 tests, no runtime dependencies
+npm test             # 115 tests, no runtime dependencies
 
 node dist/src/cli.js init      # writes mise.db.json, seeded with a worked example
 node dist/src/cli.js tree lasagne
@@ -132,11 +132,14 @@ $ mise mrp
 run is fully auditable: every line shows its working, and every planned order is
 pegged back to the meal that caused it.
 
-Two details do a lot of work here. **On hand means still edible on the day it is
-wanted** — milk that goes off on Thursday is not supply for Saturday's lasagne,
-so it does not suppress the purchase. And **safety stock is demand in its own
-right**: a buffer you have eaten into gets rebuilt whether or not anything is
-planned.
+Three details do a lot of work here. **On hand means still edible on the day it
+is wanted** — netting is date by date, so milk that goes off on Thursday is
+supply for Wednesday's dinner and not for Saturday's lasagne. **Being short on
+two distant dates is two orders**, not one big early one: salad wanted on the
+2nd and the 6th, with a two-day shelf life, is two shopping trips, because
+buying it all on the 2nd would leave half of it rotting. And **safety stock is
+demand in its own right** — a floor on the closing balance that gets rebuilt
+whether or not anything is planned.
 
 From there:
 
@@ -207,7 +210,7 @@ src/engine/       graph        low-level codes, cycles, where-used
 src/data/seed.ts  a worked example household
 src/cli.ts        the terminal front end
 web/              the browser front end, same engine
-tests/            109 tests
+tests/            115 tests
 ```
 
 The engine layer imports nothing from Node and nothing from npm, which is why

@@ -483,6 +483,17 @@ export function serve(
   servings: number,
   options: ProduceOptions = {},
 ): ProductionResult {
+  // Cook-and-eat is one operation: if the cooking fails, the ingredients it
+  // had already taken go back on the shelf, exactly as for `produce`.
+  return transactionally(db, () => serveInner(db, itemId, servings, options));
+}
+
+function serveInner(
+  db: Database,
+  itemId: ItemId,
+  servings: number,
+  options: ProduceOptions = {},
+): ProductionResult {
   const on = options.on ?? today();
   const { qty } = quantityForServings(db, itemId, servings);
   const available = availableOn(db, itemId, on);

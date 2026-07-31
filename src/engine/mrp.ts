@@ -25,7 +25,7 @@ import {
   mustItem,
   recipeFor,
 } from '../domain/db.js';
-import { addDays, maxDate, today, weekdayIndex, type IsoDate } from '../domain/date.js';
+import { addDays, daysBetween, maxDate, today, weekdayIndex, type IsoDate } from '../domain/date.js';
 import { nextId } from '../domain/ids.js';
 import { convert } from '../domain/units.js';
 import type { Database, Item, ItemId, MealPlanEntry, ProductionOrder } from '../domain/types.js';
@@ -230,14 +230,9 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
 
     const allocation = allocate(supplyFor(db, item, firmOrders, options), requirements);
     const net = allocation.shortfalls.reduce((sum, short) => sum + short.qty, 0);
-    const dueOn = allocation.shortfalls[0]?.dueOn ?? earliest;
-    const pegging = [
-      ...new Set(
-        allocation.shortfalls.length > 0
-          ? allocation.shortfalls.map((short) => short.source)
-          : [...demands.map((d) => d.source), ...firmOrders.map((o) => o.id)],
-      ),
-    ];
+    // Shortfalls far enough apart that one order could not cover both become
+    // separate orders — buying a week of salad on Monday is not a plan.
+    const runs = batchShortfalls(allocation.shortfalls, item.shelfLifeDays);
 
     const action: MrpLine['action'] = net <= 1e-9 ? 'covered' : isMade(item) ? 'make' : 'buy';
     lines.push({
@@ -269,29 +264,30 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
         continue;
       }
       const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
-      const batches = batchQty === 0 ? 0 : net / batchQty;
       const { active, passive } = recipeMinutes(recipe);
       const minutes = active + passive;
       // Backward-schedule against a usable cooking day. A four-hour braise
       // still finishes the same day; an overnight prove does not.
       const daysNeeded = Math.max(1, Math.ceil(minutes / COOKING_MINUTES_PER_DAY));
-      const startOn = addDays(dueOn, -(daysNeeded - 1));
 
-      production.push({
-        itemId,
-        name: item.name,
-        qty: net,
-        uom: item.stockUom,
-        servings: batches * recipe.servings,
-        dueOn,
-        startOn,
-        minutes,
-        level,
-        pegging,
-      });
+      for (const run of runs) {
+        const startOn = addDays(run.dueOn, -(daysNeeded - 1));
+        production.push({
+          itemId,
+          name: item.name,
+          qty: run.qty,
+          uom: item.stockUom,
+          servings: batchQty === 0 ? 0 : (run.qty / batchQty) * recipe.servings,
+          dueOn: run.dueOn,
+          startOn,
+          minutes,
+          level,
+          pegging: run.sources,
+        });
 
-      // Dependent demand, due when production starts rather than when it ends.
-      explodeOneLevel(db, itemId, net, startOn, level, pegging, addDemand, options.includeOptional);
+        // Dependent demand, due when production starts rather than when it ends.
+        explodeOneLevel(db, itemId, run.qty, startOn, level, run.sources, addDemand, options.includeOptional);
+      }
       continue;
     }
 
@@ -299,25 +295,27 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
     if (!item.purchase) {
       problems.push(`"${item.name}" is short by ${net.toFixed(1)} ${item.stockUom} but has no supplier.`);
     }
-    const trip = schedulePurchase(db, item, dueOn, asOf);
-    if (trip.late) {
-      const supplier = item.purchase ? findSupplier(db, item.purchase.supplierId) : undefined;
-      conflicts.push(
-        `${item.name} is needed ${dueOn}, but ${supplier?.name ?? 'the supplier'} cannot supply ` +
-          `it in time — the earliest trip is ${trip.orderBy}.`,
-      );
+    for (const run of runs) {
+      const trip = schedulePurchase(db, item, run.dueOn, asOf);
+      if (trip.late) {
+        const supplier = item.purchase ? findSupplier(db, item.purchase.supplierId) : undefined;
+        conflicts.push(
+          `${item.name} is needed ${run.dueOn}, but ${supplier?.name ?? 'the supplier'} cannot supply ` +
+            `it in time — the earliest trip is ${trip.orderBy}.`,
+        );
+      }
+      purchases.push({
+        itemId,
+        name: item.name,
+        qty: run.qty,
+        uom: item.stockUom,
+        neededOn: run.dueOn,
+        orderBy: trip.orderBy,
+        late: trip.late,
+        ...(item.purchase ? { supplierId: item.purchase.supplierId } : {}),
+        pegging: run.sources,
+      });
     }
-    purchases.push({
-      itemId,
-      name: item.name,
-      qty: net,
-      uom: item.stockUom,
-      neededOn: dueOn,
-      orderBy: trip.orderBy,
-      late: trip.late,
-      ...(item.purchase ? { supplierId: item.purchase.supplierId } : {}),
-      pegging,
-    });
   }
 
   return {
@@ -335,6 +333,43 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
 
 /** Pegging label for a requirement that exists only to rebuild a buffer. */
 const SAFETY_STOCK = 'safety stock';
+
+interface OrderRun {
+  qty: number;
+  readonly dueOn: IsoDate;
+  readonly sources: string[];
+}
+
+/**
+ * Gather dated shortfalls into runs that a single order could actually cover.
+ *
+ * Netting per date tells you *when* you are short; it does not follow that one
+ * trip can fix it. Salad wanted on the 2nd and again on the 6th, with a two-day
+ * shelf life, is two shopping trips — buying it all on the 2nd would leave half
+ * of it rotting. A shortfall joins the run in progress only if the food would
+ * still be good when it is wanted; an item with no shelf life keeps, so
+ * everything merges into one order.
+ */
+function batchShortfalls(
+  shortfalls: readonly Shortfall[],
+  shelfLifeDays: number | undefined,
+): OrderRun[] {
+  const runs: OrderRun[] = [];
+  for (const short of shortfalls) {
+    const current = runs[runs.length - 1];
+    const stillGood =
+      current !== undefined &&
+      (shelfLifeDays === undefined || daysBetween(current.dueOn, short.dueOn) <= shelfLifeDays);
+
+    if (current && stillGood) {
+      current.qty += short.qty;
+      if (!current.sources.includes(short.source)) current.sources.push(short.source);
+    } else {
+      runs.push({ qty: short.qty, dueOn: short.dueOn, sources: [short.source] });
+    }
+  }
+  return runs;
+}
 
 /**
  * A quantity of supply, with the window in which it can actually be used.

@@ -4,7 +4,7 @@ import { seedDatabase } from '../src/data/seed.js';
 import { onHand, receive } from '../src/engine/inventory.js';
 import { runMrp } from '../src/engine/mrp.js';
 import { packsFor, raisePurchaseOrders, shoppingList } from '../src/engine/procurement.js';
-import { cookableNow, feasibility, prepSchedule, produce } from '../src/engine/production.js';
+import { cookableNow, feasibility, prepSchedule, produce, serve } from '../src/engine/production.js';
 import { ShortageError } from '../src/domain/errors.js';
 import { close, db, made, nestedDb, purchased, recipe } from './helpers.js';
 
@@ -308,4 +308,37 @@ test('shortages are still reported rather than thrown when asked for', () => {
   const result = produce(database, 'sauce', 1000, { on: '2026-07-01', allowShortages: true });
   assert.ok(result.shortages.length > 0);
   assert.equal(onHand(database, 'sauce'), 1000, 'the cook pressed on regardless');
+});
+
+test('a failed serve leaves the pantry exactly as it found it', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 500, unitCost: 0.01 });
+  receive(database, 'flour', { qty: 500, unitCost: 0.01 });
+  // No cheese, so cooking the dish to serve it fails part-way through.
+  const ledgerBefore = database.ledger.length;
+
+  assert.throws(() => serve(database, 'dish', 4, { on: '2026-07-01' }), ShortageError);
+
+  assert.equal(onHand(database, 'butter'), 500, 'cook-and-serve rolls back as one unit');
+  assert.equal(onHand(database, 'flour'), 500);
+  assert.equal(onHand(database, 'sauce'), 0);
+  assert.equal(database.ledger.length, ledgerBefore);
+});
+
+test('a purchase order arrives on the lead time the plan was made with', () => {
+  const database = nestedDb();
+  // The supplier is slow by default, but this item can be had the same day.
+  database.suppliers = [{ id: 'shop', name: 'Shop', leadTimeDays: 3 }];
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-05', slot: 'dinner', itemId: 'cheese', servings: 200 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 14 });
+  const planned = mrp.purchases.find((line) => line.itemId === 'cheese')!;
+  const [order] = raisePurchaseOrders(database, shoppingList(database, mrp), '2026-07-01');
+
+  assert.ok(order);
+  assert.equal(planned.late, false, 'the item itself has no lead time');
+  assert.ok(
+    order.expectedOn <= planned.neededOn,
+    `committed arrival ${order.expectedOn} must not fall after ${planned.neededOn}`,
+  );
 });
