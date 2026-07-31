@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { addDays, daysBetween, formatDate, isIsoDate, parseDate, weekdayOf } from '../src/domain/date.js';
+import {
+  addDays,
+  daysBetween,
+  formatDate,
+  isIsoDate,
+  parseDate,
+  today,
+  weekdayOf,
+} from '../src/domain/date.js';
 import { MiseError } from '../src/domain/errors.js';
 
 test('accepts real calendar dates', () => {
@@ -48,4 +56,24 @@ test('date arithmetic crosses months and years', () => {
 test('formatting is stable and timezone-independent', () => {
   assert.equal(weekdayOf('2026-07-30'), 'Thu');
   assert.equal(formatDate('2026-07-30'), 'Thu 30 Jul');
+});
+
+test('today is the local calendar date, not the UTC one', () => {
+  // Noon UTC on 31 July is already 1 August east of UTC+12 and still 31 July
+  // in the Americas. `en-CA` formats as YYYY-MM-DD in whatever zone the suite
+  // runs in, so this assertion is a real one everywhere except UTC itself —
+  // and the suite is run under several zones.
+  const instant = new Date('2026-07-31T12:00:00Z');
+  assert.equal(today(instant), instant.toLocaleDateString('en-CA'));
+
+  const midnight = new Date('2026-01-01T00:30:00Z');
+  assert.equal(today(midnight), midnight.toLocaleDateString('en-CA'));
+});
+
+test('date arithmetic still round-trips regardless of zone', () => {
+  // `isoDate` stays UTC-based because every date string is anchored at UTC
+  // midnight; changing it would break addDays in non-UTC zones.
+  assert.equal(addDays('2026-07-31', 1), '2026-08-01');
+  assert.equal(addDays('2026-08-01', -1), '2026-07-31');
+  assert.equal(daysBetween('2026-07-31', '2026-08-01'), 1);
 });

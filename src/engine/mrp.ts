@@ -271,7 +271,19 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       const daysNeeded = Math.max(1, Math.ceil(minutes / COOKING_MINUTES_PER_DAY));
 
       for (const run of runs) {
-        const startOn = addDays(run.dueOn, -(daysNeeded - 1));
+        const wantedStart = addDays(run.dueOn, -(daysNeeded - 1));
+        // You cannot start yesterday. If the recipe's own timings say the
+        // deadline has already passed, say so instead of quietly printing a
+        // prep task on a day that has gone — the same courtesy the buy side
+        // gets when a shop cannot deliver in time.
+        const startOn = maxDate(asOf, wantedStart);
+        if (wantedStart < asOf) {
+          conflicts.push(
+            `${item.name} needs ${Math.round(minutes / 60)}h and is due ${run.dueOn}, so it should ` +
+              `have been started on ${wantedStart} — the earliest it can now begin is ${startOn}.`,
+          );
+        }
+
         production.push({
           itemId,
           name: item.name,
@@ -401,6 +413,10 @@ function supplyFor(
     if (lot.itemId !== item.id || lot.qty <= 0) continue;
     buckets.push({
       qty: lot.qty,
+      // A lot booked in for a future date has not arrived yet, so it is no more
+      // available today than an open delivery is. Almost every lot is dated in
+      // the past, where this bound is simply inert.
+      from: lot.receivedOn,
       kind: 'stock',
       ...(lot.expiresOn ? { until: lot.expiresOn } : {}),
     });

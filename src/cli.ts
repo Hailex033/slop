@@ -800,7 +800,7 @@ const commands: Record<string, Command> = {
   },
 
   cook: {
-    usage: 'mise cook <item> [-s servings] [--dry]',
+    usage: 'mise cook <item> [-s servings] [--dry] [--force]',
     summary: 'Make something: issue the ingredients, book in the result.',
     group: 'planning',
     run: (ctx) => {
@@ -827,7 +827,9 @@ const commands: Record<string, Command> = {
         return;
       }
 
-      const result = cook(ctx.db, target.itemId, target.servings, { allowShortages: true });
+      const result = cook(ctx.db, target.itemId, target.servings, {
+        allowShortages: boolFlag(ctx.args, 'force'),
+      });
       ctx.dirty = true;
 
       out(f.heading(`Made ${result.name} — ${f.qty(result.qty, result.uom as UomCode)}`));
@@ -857,15 +859,29 @@ const commands: Record<string, Command> = {
   },
 
   serve: {
-    usage: 'mise serve <item> [-s servings]',
+    usage: 'mise serve <item> [-s servings] [--force]',
     summary: 'Eat it: cook if needed, then take it out of stock.',
     group: 'planning',
     run: (ctx) => {
       const ref = ctx.args.positionals[0];
       if (!ref) throw new MiseError('Usage: mise serve <item> [-s servings]');
       const target = targetOf(ctx, ref);
-      const result = serve(ctx.db, target.itemId, target.servings, { allowShortages: true });
+      // Without --force this throws rather than inventing a meal out of an
+      // empty pantry. Recording food as eaten that was never there corrupts
+      // the ledger, the cost history and every future planning run.
+      const force = boolFlag(ctx.args, 'force');
+      const result = serve(ctx.db, target.itemId, target.servings, { allowShortages: force });
       ctx.dirty = true;
+
+      if (result.shortages.length > 0) {
+        out(f.style(`! Served ${f.num(target.servings)} of ${result.name}, but short:`, 'yellow'));
+        for (const shortage of result.shortages) {
+          out(f.style(`    ${shortage.name} — ${f.qty(shortage.short, shortage.uom as UomCode)}`, 'red'));
+        }
+        out(f.style('  The ledger records this as consumed anyway; run `mise stock` to correct it.', 'grey'));
+        return;
+      }
+
       out(
         `${f.style('✓', 'green')} Served ${f.num(target.servings)} of ${result.name} ` +
           f.style(`(${f.money(result.cost, ctx.db.settings.currency)})`, 'grey'),
@@ -924,7 +940,7 @@ const commands: Record<string, Command> = {
       if (!id) throw new MiseError('Usage: mise receive <PO-0001 | PRD-0001>');
 
       if (id.startsWith('PRD')) {
-        const result = executeOrder(ctx.db, id, { allowShortages: true });
+        const result = executeOrder(ctx.db, id, { allowShortages: boolFlag(ctx.args, 'force') });
         ctx.dirty = true;
         out(
           `${f.style('✓', 'green')} Made ${f.qty(result.qty, result.uom as UomCode)} of ${result.name} ` +

@@ -45,7 +45,7 @@ expands those. That is the whole trick, and everything else falls out of it.
 ```bash
 npm install          # only @types/node and typescript, both dev-only
 npm run build
-npm test             # 119 tests, no runtime dependencies
+npm test             # 125 tests, no runtime dependencies
 
 node dist/src/cli.js init      # writes mise.db.json, seeded with a worked example
 node dist/src/cli.js tree lasagne
@@ -156,7 +156,11 @@ From there:
   A sourdough needing an overnight retard gets scheduled two days out.
 - `mise cook lasagne` issues ingredients first-expired-first-out, cascades into
   any sub-recipe you don't already have in the fridge, and books the result back
-  in at what the lots it consumed *actually* cost, not list price.
+  in at what the lots it consumed *actually* cost, not list price. If something
+  is missing it refuses and rolls back rather than cooking a dish out of an
+  empty pantry; `--force` records it anyway and tells you exactly what was
+  short, because a ledger that claims food was eaten when it never existed is
+  worse than no ledger.
 - `mise feasible` answers "what can I make right now" by netting against stock
   at every level: a tub of ragù in the fridge counts as ragù rather than being
   exploded into mince you no longer have, while a shared ingredient is drawn
@@ -188,8 +192,8 @@ the dish out of stock → the next `mrp` sees the new position.
 | `shop [--commit]` | Costed shopping list, by supplier |
 | `prep` | Day-by-day prep timetable |
 | `orders`, `receive <id>` | Open orders; book in a delivery or a batch |
-| `cook <item> [-s n] [--dry]` | Make it |
-| `serve <item> [-s n]` | Eat it |
+| `cook <item> [-s n] [--dry] [--force]` | Make it |
+| `serve <item> [-s n] [--force]` | Eat it |
 | **Admin** | |
 | `doctor` | Cycles, dangling refs, impossible conversions |
 | `items`, `ledger`, `report` | Item master, transaction log, dashboard |
@@ -210,7 +214,7 @@ src/engine/       graph        low-level codes, cycles, where-used
 src/data/seed.ts  a worked example household
 src/cli.ts        the terminal front end
 web/              the browser front end, same engine
-tests/            119 tests
+tests/            125 tests
 ```
 
 The engine layer imports nothing from Node and nothing from npm, which is why

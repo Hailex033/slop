@@ -25,12 +25,30 @@ export function isIsoDate(value: string): boolean {
   return new Date(ms).toISOString().slice(0, 10) === value;
 }
 
+/**
+ * The UTC calendar date of an instant.
+ *
+ * Used for date *arithmetic*, where every timestamp is anchored at UTC
+ * midnight by construction. Not for "what day is it" — see `today`.
+ */
 export function isoDate(date: Date): IsoDate {
   return date.toISOString().slice(0, 10) as IsoDate;
 }
 
+/**
+ * Today, on the calendar hanging in the user's kitchen.
+ *
+ * Deliberately built from local year/month/day rather than `toISOString`, which
+ * reports the UTC date: at 9 pm in New York that is already tomorrow, and just
+ * after midnight in Auckland it is still yesterday. Getting this wrong shifts
+ * meal plans, expiry checks and every dated transaction by a day for anyone
+ * not on UTC.
+ */
 export function today(now: Date = new Date()): IsoDate {
-  return isoDate(now);
+  const year = String(now.getFullYear()).padStart(4, '0');
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}` as IsoDate;
 }
 
 function toUtc(date: IsoDate): number {

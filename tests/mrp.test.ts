@@ -426,6 +426,60 @@ test('a delivery that lands in time is still credited', () => {
   assert.equal(cheese.action, 'covered');
 });
 
+test('a lot booked in for a future date is not supply today', () => {
+  const database = nestedDb();
+  planned(database, 'cheese', 200, '2026-07-05');
+  receive(database, 'cheese', { qty: 500, on: '2026-07-10' });
+
+  const cheese = runMrp(database, { asOf: '2026-07-01', horizonDays: 14 }).lines.find(
+    (line) => line.itemId === 'cheese',
+  )!;
+
+  assert.equal(cheese.onHand, 0, 'it has not arrived yet');
+  assert.ok(close(cheese.net, 200));
+});
+
+test('a lot that has already arrived still counts', () => {
+  const database = nestedDb();
+  planned(database, 'cheese', 200, '2026-07-05');
+  receive(database, 'cheese', { qty: 500, on: '2026-07-04' });
+
+  const cheese = runMrp(database, { asOf: '2026-07-01', horizonDays: 14 }).lines.find(
+    (line) => line.itemId === 'cheese',
+  )!;
+
+  assert.ok(close(cheese.onHand, 200));
+  assert.equal(cheese.action, 'covered');
+});
+
+test('production that should have started already is reported, not back-dated', () => {
+  const database = nestedDb();
+  database.recipes = database.recipes.map((recipe) =>
+    recipe.outputItemId === 'sauce'
+      ? { ...recipe, steps: [{ text: 'reduce', passiveMin: 600 }] }
+      : recipe,
+  );
+  // A ten-hour recipe wanted today cannot fit in the eight-hour day it has.
+  planned(database, 'sauce', 1000, '2026-07-01');
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const batch = result.production.find((order) => order.itemId === 'sauce')!;
+
+  assert.ok(batch.startOn >= '2026-07-01', 'no prep task on a day that has gone');
+  assert.ok(
+    result.conflicts.some((conflict) => conflict.includes('sauce')),
+    `the impossible deadline must be surfaced: ${JSON.stringify(result.conflicts)}`,
+  );
+});
+
+test('production that comfortably fits raises no conflict', () => {
+  const database = nestedDb();
+  planned(database, 'sauce', 1000, '2026-07-05');
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.deepEqual(result.conflicts, []);
+});
+
 test('the example week produces both a shopping list and a cook list', () => {
   const database = seedDatabase({ from: '2026-07-01' });
   const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
