@@ -206,3 +206,23 @@ test('items with no safety level appear only when they are actually in stock', (
     ['flour'],
   );
 });
+
+test('a lot cannot be used before the day it arrived', () => {
+  const database = pantry();
+  receive(database, 'flour', { qty: 500, on: '2026-07-10' });
+
+  assert.equal(onHand(database, 'flour'), 500, 'it exists in the books');
+  assert.equal(availableOn(database, 'flour', '2026-07-01'), 0, 'but not yet on the shelf');
+  assert.equal(availableOn(database, 'flour', '2026-07-10'), 500, 'available the day it lands');
+  assert.equal(availableOn(database, 'flour', '2026-07-11'), 500);
+
+  assert.throws(() => issue(database, 'flour', { qty: 100, on: '2026-07-01' }), ShortageError);
+  assert.equal(issue(database, 'flour', { qty: 100, on: '2026-07-10' }).issued, 100);
+});
+
+test('back-dating an issue to after the receipt is still fine', () => {
+  const database = pantry();
+  receive(database, 'flour', { qty: 500, on: '2026-07-01' });
+  // Recording on Friday that you cooked on Wednesday, with stock in since Monday.
+  assert.equal(issue(database, 'flour', { qty: 100, on: '2026-07-03' }).issued, 100);
+});

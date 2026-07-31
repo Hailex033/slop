@@ -173,8 +173,8 @@ test('an empty pantry can cook nothing', () => {
 
 test('cooking issues the components and books in the output', () => {
   const database = nestedDb();
-  receive(database, 'butter', { qty: 1000, unitCost: 0.01 });
-  receive(database, 'flour', { qty: 1000, unitCost: 0.01 });
+  receive(database, 'butter', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
 
   const result = produce(database, 'crust', 300, { on: '2026-07-01' });
 
@@ -187,8 +187,8 @@ test('cooking issues the components and books in the output', () => {
 
 test('a missing sub-recipe is cooked on the spot, recursively', () => {
   const database = nestedDb();
-  receive(database, 'butter', { qty: 1000, unitCost: 0.01 });
-  receive(database, 'flour', { qty: 1000, unitCost: 0.01 });
+  receive(database, 'butter', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
 
   // Sauce needs roux, which is a phantom made of butter and flour. Nothing
   // but raw ingredients is in the house.
@@ -203,11 +203,11 @@ test('a missing sub-recipe is cooked on the spot, recursively', () => {
 
 test('a stocked sub-recipe short by some amount is topped up, not remade wholesale', () => {
   const database = nestedDb();
-  receive(database, 'butter', { qty: 1000, unitCost: 0.01 });
-  receive(database, 'flour', { qty: 1000, unitCost: 0.01 });
-  receive(database, 'cheese', { qty: 1000, unitCost: 0.01 });
-  receive(database, 'sauce', { qty: 600, unitCost: 0.002 });
-  receive(database, 'crust', { qty: 300, unitCost: 0.01 });
+  receive(database, 'butter', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'sauce', { qty: 600, unitCost: 0.002, on: '2026-06-30' });
+  receive(database, 'crust', { qty: 300, unitCost: 0.01, on: '2026-06-30' });
 
   produce(database, 'dish', 1500, { on: '2026-07-01' });
 
@@ -222,8 +222,8 @@ test('a stocked sub-recipe short by some amount is topped up, not remade wholesa
 test('actual cost comes from the lots consumed, not the price list', () => {
   const database = nestedDb();
   // Bought cheap in a sale; the standard cost is £0.01/g.
-  receive(database, 'butter', { qty: 1000, unitCost: 0.005 });
-  receive(database, 'flour', { qty: 1000, unitCost: 0.005 });
+  receive(database, 'butter', { qty: 1000, unitCost: 0.005, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 1000, unitCost: 0.005, on: '2026-06-30' });
 
   const result = produce(database, 'crust', 300, { on: '2026-07-01' });
   assert.ok(close(result.cost, 1.5), `got ${result.cost}`);
@@ -234,8 +234,8 @@ test('actual cost comes from the lots consumed, not the price list', () => {
 
 test('shortages are reported rather than silently producing from nothing', () => {
   const database = nestedDb();
-  receive(database, 'butter', { qty: 10 });
-  receive(database, 'flour', { qty: 10 });
+  receive(database, 'butter', { qty: 10, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 10, on: '2026-06-30' });
 
   const result = produce(database, 'crust', 300, { on: '2026-07-01', allowShortages: true });
   const short = new Map(result.shortages.map((entry) => [entry.itemId, entry.short]));
@@ -287,8 +287,8 @@ test('a shortage below a phantom is refused, exactly as one above it would be', 
 
 test('a failed production leaves the pantry exactly as it found it', () => {
   const database = nestedDb();
-  receive(database, 'butter', { qty: 500, unitCost: 0.01 });
-  receive(database, 'flour', { qty: 500, unitCost: 0.01 });
+  receive(database, 'butter', { qty: 500, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, unitCost: 0.01, on: '2026-06-30' });
   // No cheese, so the dish fails — but only after butter and flour have been
   // issued to the sauce and the crust.
   const ledgerBefore = database.ledger.length;
@@ -312,8 +312,8 @@ test('shortages are still reported rather than thrown when asked for', () => {
 
 test('a failed serve leaves the pantry exactly as it found it', () => {
   const database = nestedDb();
-  receive(database, 'butter', { qty: 500, unitCost: 0.01 });
-  receive(database, 'flour', { qty: 500, unitCost: 0.01 });
+  receive(database, 'butter', { qty: 500, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, unitCost: 0.01, on: '2026-06-30' });
   // No cheese, so cooking the dish to serve it fails part-way through.
   const ledgerBefore = database.ledger.length;
 
@@ -341,4 +341,63 @@ test('a purchase order arrives on the lead time the plan was made with', () => {
     order.expectedOn <= planned.neededOn,
     `committed arrival ${order.expectedOn} must not fall after ${planned.neededOn}`,
   );
+});
+
+test('feasibility ignores stock that has not arrived yet', () => {
+  const database = nestedDb();
+  receive(database, 'sauce', { qty: 1000, on: '2026-07-10' });
+  receive(database, 'crust', { qty: 300, on: '2026-07-10' });
+  receive(database, 'cheese', { qty: 200, on: '2026-07-10' });
+
+  assert.equal(feasibility(database, 'dish', 4, '2026-07-01').servings, 0, 'none of it is here yet');
+  assert.ok(close(feasibility(database, 'dish', 4, '2026-07-10').servings, 4, 1e-3));
+});
+
+test('a multi-batch run is scheduled for the work it actually is', () => {
+  const database = db(
+    [purchased('flour', {
+      purchase: { supplierId: 'shop', packQty: 1000, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+    }), made('loaf')],
+    [
+      recipe('loaf', 100, [{ itemId: 'flour', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'work', activeMin: 60 }, { text: 'rest', passiveMin: 240 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-20', slot: 'dinner', itemId: 'loaf', servings: 20 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 30 });
+  const run = mrp.production.find((order) => order.itemId === 'loaf')!;
+
+  // Twenty batches: hands-on time multiplies, the rest happens in parallel.
+  assert.ok(close(run.activeMin, 20 * 60), `got ${run.activeMin}`);
+  assert.ok(close(run.passiveMin, 240), 'twenty loaves rest in the same four hours');
+  assert.ok(close(run.minutes, 1440));
+  // 1440 minutes is three eight-hour days, so it cannot start on the due date.
+  assert.equal(run.startOn, '2026-07-18');
+
+  const day = prepSchedule(database, mrp).find((entry) => entry.date === '2026-07-18')!;
+  assert.ok(close(day.activeMin, 1200), 'the prep sheet shows the real workload');
+});
+
+test('a single-batch run is unchanged', () => {
+  const database = db(
+    [purchased('flour', {
+      purchase: { supplierId: 'shop', packQty: 1000, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+    }), made('loaf')],
+    [
+      recipe('loaf', 100, [{ itemId: 'flour', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'work', activeMin: 60 }, { text: 'rest', passiveMin: 240 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-20', slot: 'dinner', itemId: 'loaf', servings: 1 });
+
+  const run = runMrp(database, { asOf: '2026-07-01', horizonDays: 30 }).production.find(
+    (order) => order.itemId === 'loaf',
+  )!;
+
+  assert.ok(close(run.activeMin, 60));
+  assert.ok(close(run.minutes, 300));
+  assert.equal(run.startOn, '2026-07-20', 'five hours fits in the day it is due');
 });

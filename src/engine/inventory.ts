@@ -20,11 +20,19 @@ export function lotsOf(db: Database, itemId: ItemId): Lot[] {
 }
 
 /**
- * Lots still fit to use on a given date. An undated lot never expires, and a
- * lot is good through its expiry date itself.
+ * Lots you could actually put your hands on that day.
+ *
+ * Bounded at both ends: a lot is no use before it was received, and no use
+ * after it expires. It is good through its expiry date itself, and an undated
+ * lot never expires. Back-dating a receipt or an issue is still fine — what
+ * this rules out is consuming stock earlier than the day it arrived, which
+ * `availableOn`, `issue` and feasibility would otherwise allow even though MRP
+ * would not.
  */
 export function usableLots(db: Database, itemId: ItemId, asOf: IsoDate): Lot[] {
-  return lotsOf(db, itemId).filter((lot) => !lot.expiresOn || lot.expiresOn >= asOf);
+  return lotsOf(db, itemId).filter(
+    (lot) => lot.receivedOn <= asOf && (!lot.expiresOn || lot.expiresOn >= asOf),
+  );
 }
 
 /**

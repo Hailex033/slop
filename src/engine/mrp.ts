@@ -72,7 +72,12 @@ export interface PlannedProduction {
   readonly dueOn: IsoDate;
   /** Latest start that still hits the due date, from the recipe's own timings. */
   readonly startOn: IsoDate;
+  /** Total wall-clock minutes for the whole run, not for one batch. */
   readonly minutes: number;
+  /** Hands-on minutes, which scale with the number of batches. */
+  readonly activeMin: number;
+  /** Unattended minutes, which do not: batches prove and simmer in parallel. */
+  readonly passiveMin: number;
   readonly level: number;
   readonly pegging: readonly string[];
 }
@@ -264,13 +269,22 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
         continue;
       }
       const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
-      const { active, passive } = recipeMinutes(recipe);
-      const minutes = active + passive;
-      // Backward-schedule against a usable cooking day. A four-hour braise
-      // still finishes the same day; an overnight prove does not.
-      const daysNeeded = Math.max(1, Math.ceil(minutes / COOKING_MINUTES_PER_DAY));
+      const perBatch = recipeMinutes(recipe);
 
       for (const run of runs) {
+        // Timing is per *run*, not per batch. Hands-on work scales with the
+        // number of batches — you have to brown twenty lots of mince twenty
+        // times — while unattended time does not, because batches prove and
+        // simmer alongside each other. Treating a twenty-batch run as a
+        // one-batch job understates the day by hours.
+        const batches = batchQty === 0 ? 0 : run.qty / batchQty;
+        const activeMin = perBatch.active * batches;
+        const passiveMin = perBatch.passive;
+        const minutes = activeMin + passiveMin;
+
+        // Backward-schedule against a usable cooking day. A four-hour braise
+        // still finishes the same day; an overnight prove does not.
+        const daysNeeded = Math.max(1, Math.ceil(minutes / COOKING_MINUTES_PER_DAY));
         const wantedStart = addDays(run.dueOn, -(daysNeeded - 1));
         // You cannot start yesterday. If the recipe's own timings say the
         // deadline has already passed, say so instead of quietly printing a
@@ -289,10 +303,12 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
           name: item.name,
           qty: run.qty,
           uom: item.stockUom,
-          servings: batchQty === 0 ? 0 : (run.qty / batchQty) * recipe.servings,
+          servings: batches * recipe.servings,
           dueOn: run.dueOn,
           startOn,
           minutes,
+          activeMin,
+          passiveMin,
           level,
           pegging: run.sources,
         });

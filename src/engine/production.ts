@@ -78,7 +78,6 @@ export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
 
 function toPrepTask(db: Database, planned: PlannedProduction): PrepTask {
   const recipe = recipeFor(db, planned.itemId);
-  const minutes = recipe ? recipeMinutes(recipe) : { active: 0, passive: 0 };
   return {
     itemId: planned.itemId,
     name: planned.name,
@@ -87,8 +86,11 @@ function toPrepTask(db: Database, planned: PlannedProduction): PrepTask {
     servings: planned.servings,
     on: planned.startOn,
     dueOn: planned.dueOn,
-    activeMin: minutes.active,
-    passiveMin: minutes.passive,
+    // Straight from the planning run, which already scaled hands-on time by
+    // the batch count. Recomputing from the recipe here would quietly report
+    // a twenty-batch day as a one-batch day.
+    activeMin: planned.activeMin,
+    passiveMin: planned.passiveMin,
     level: planned.level,
     steps: (recipe?.steps ?? []).map((step) => step.text),
   };
@@ -120,13 +122,14 @@ export interface Shortage {
 
 /**
  * Free stock per item, as a working balance that a walk can draw down.
- * Only counts lots still fit to use, so a fridge full of past-date yoghurt
- * does not make a dish look possible.
+ * Counts only lots you could actually reach on the day — nothing past its
+ * date, and nothing that has not arrived yet.
  */
 function stockBalances(db: Database, asOf: IsoDate): Map<ItemId, number> {
   const balances = new Map<ItemId, number>();
   for (const lot of db.lots) {
     if (lot.qty <= 0) continue;
+    if (lot.receivedOn > asOf) continue;
     if (lot.expiresOn && lot.expiresOn < asOf) continue;
     balances.set(lot.itemId, (balances.get(lot.itemId) ?? 0) + lot.qty);
   }
