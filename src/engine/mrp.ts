@@ -231,12 +231,22 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
     // Net date by date. A carton that goes off on Thursday is supply for
     // Wednesday's dinner and not for Friday's, so a single lump comparison
     // against the earliest due date would let one carton cover the whole week.
-    const requirements = [...demands].sort((a, b) => a.dueOn.localeCompare(b.dueOn));
+    const requirements = [...demands];
     if (safety > 0) {
-      // Safety stock is a floor on the closing balance: it has to be there at
-      // the end, after everything planned has been eaten.
-      requirements.push({ itemId, qty: safety, dueOn: horizonEnd, source: SAFETY_STOCK, level });
+      // Safety stock is a floor on the balance. Normally that bites at the end
+      // of the horizon, after everything planned has been eaten — but a buffer
+      // that is *already* short is short today, and telling someone to restock
+      // on day seven leaves the minimum unmet all week.
+      const shortNow = !options.ignoreStock && availableOn(db, itemId, asOf) + 1e-9 < safety;
+      requirements.push({
+        itemId,
+        qty: safety,
+        dueOn: shortNow ? asOf : horizonEnd,
+        source: SAFETY_STOCK,
+        level,
+      });
     }
+    requirements.sort((a, b) => a.dueOn.localeCompare(b.dueOn));
 
     const allocation = allocate(supplyFor(db, item, firmOrders, options), requirements);
     const net = allocation.shortfalls.reduce((sum, short) => sum + short.qty, 0);

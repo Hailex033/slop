@@ -537,6 +537,38 @@ test('a phantom needed once is still exploded once', () => {
   assert.equal(butter.length, 1);
 });
 
+test('a buffer that is already short is wanted today, not on the last day', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, safetyStock: 300 } : item,
+  );
+
+  const buy = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }).purchases.find(
+    (line) => line.itemId === 'cheese',
+  )!;
+
+  assert.equal(buy.neededOn, '2026-07-01', 'an empty buffer is empty now');
+  assert.equal(buy.orderBy, '2026-07-01');
+});
+
+test('a buffer that is intact is only a floor on the closing balance', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, safetyStock: 300 } : item,
+  );
+  receive(database, 'cheese', { qty: 300, on: '2026-06-30' });
+  planned(database, 'cheese', 200, '2026-07-03');
+
+  const buy = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }).purchases.find(
+    (line) => line.itemId === 'cheese',
+  )!;
+
+  // The buffer is fine today; what is missing is the 200 g eaten on the 3rd,
+  // which has to be back before the horizon closes.
+  assert.ok(close(buy.qty, 200), `got ${buy.qty}`);
+  assert.equal(buy.neededOn, '2026-07-07');
+});
+
 test('the example week produces both a shopping list and a cook list', () => {
   const database = seedDatabase({ from: '2026-07-01' });
   const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });

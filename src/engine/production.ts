@@ -18,7 +18,7 @@ import type { Database, ItemId, ProductionOrder } from '../domain/types.js';
 import { quantityForServings, servingsForQuantity } from './explode.js';
 import { availableOn, isUsableOn, issue, receive, transactionally } from './inventory.js';
 import type { MrpResult, PlannedProduction } from './mrp.js';
-import { rollupTime, runMinutes } from './rollup.js';
+import { runMinutes } from './rollup.js';
 
 // ---------------------------------------------------------------------------
 // Scheduling
@@ -136,7 +136,8 @@ function stockBalances(db: Database, asOf: IsoDate): Map<ItemId, number> {
 
 /**
  * Net a requirement against stock at *every* level, recording what is still
- * missing at the bottom.
+ * missing at the bottom, and returning how long the part that still has to be
+ * made would actually take.
  *
  * The two properties that matter, and that a plain explode-then-compare gets
  * wrong in opposite directions:
@@ -155,8 +156,8 @@ function netRequirements(
   balances: Map<ItemId, number>,
   shortfalls: Map<ItemId, number>,
   seen: ReadonlySet<ItemId> = new Set(),
-): void {
-  if (qty <= 1e-9) return;
+): number {
+  if (qty <= 1e-9) return 0;
   const item = mustItem(db, itemId);
 
   // Phantoms are never on a shelf, whatever the ledger might say.
@@ -165,18 +166,23 @@ function netRequirements(
   if (taken > 0) balances.set(itemId, available - taken);
 
   const remaining = qty - taken;
-  if (remaining <= 1e-9) return;
+  // Covered off the shelf: nothing to make, so nothing to wait for. A sauce
+  // that simmered for two hours last week costs nothing today.
+  if (remaining <= 1e-9) return 0;
 
   const recipe = isMade(item) && !seen.has(itemId) ? recipeFor(db, itemId) : undefined;
   if (!recipe) {
     shortfalls.set(itemId, (shortfalls.get(itemId) ?? 0) + remaining);
-    return;
+    return 0;
   }
 
   const nextSeen = new Set(seen).add(itemId);
   const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
   const batches = batchQty === 0 ? 0 : remaining / batchQty;
 
+  // Sub-recipes can be made alongside one another, so the wait is set by the
+  // slowest branch, not the sum — the same rule `rollupTime` uses.
+  let slowestBranch = 0;
   for (const component of recipe.components) {
     if (component.optional) continue;
     const child = findItem(db, component.itemId);
@@ -184,18 +190,23 @@ function netRequirements(
     const scaled = component.scalable === false ? component.qty : component.qty * batches;
     const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));
     const gross = component.lossPct ? net / (1 - component.lossPct) : net;
-    netRequirements(db, child.id, gross, balances, shortfalls, nextSeen);
+    slowestBranch = Math.max(slowestBranch, netRequirements(db, child.id, gross, balances, shortfalls, nextSeen));
   }
+
+  return runMinutes(recipe, batches).total + slowestBranch;
 }
 
-/** What you would still have to buy to make `servings` of something. */
+/**
+ * What you would still have to buy to make `servings` of something, and how
+ * long the cooking that remains would take.
+ */
 function shortfallsFor(
   db: Database,
   itemId: ItemId,
   servings: number,
   asOf: IsoDate,
   fromScratch = false,
-): Map<ItemId, number> {
+): { shortfalls: Map<ItemId, number>; minutes: number } {
   const shortfalls = new Map<ItemId, number>();
   const { qty } = quantityForServings(db, itemId, servings);
   const balances = stockBalances(db, asOf);
@@ -204,8 +215,8 @@ function shortfallsFor(
   // cooking we ignore any finished stock of the dish itself and price the job
   // from its ingredients.
   if (fromScratch) balances.delete(itemId);
-  netRequirements(db, itemId, qty, balances, shortfalls);
-  return shortfalls;
+  const minutes = netRequirements(db, itemId, qty, balances, shortfalls);
+  return { shortfalls, minutes };
 }
 
 /**
@@ -223,7 +234,7 @@ function maxFeasibleServings(
   fromScratch: boolean,
 ): number {
   const ok = (servings: number): boolean =>
-    shortfallsFor(db, itemId, servings, asOf, fromScratch).size === 0;
+    shortfallsFor(db, itemId, servings, asOf, fromScratch).shortfalls.size === 0;
 
   let low = 0;
   let high = probe;
@@ -262,18 +273,18 @@ export function feasibility(
   const recipe = recipeFor(db, itemId);
   const probe = targetServings ?? recipe?.servings ?? 1;
 
-  const shortfalls = shortfallsFor(db, itemId, probe, asOf, fromScratch);
+  const probed = shortfallsFor(db, itemId, probe, asOf, fromScratch);
+  const shortfalls = probed.shortfalls;
   // The same walk against an empty pantry gives the denominator for coverage:
   // everything this dish needs, whether or not it happens to be in.
   const everything = new Map<ItemId, number>();
   netRequirements(db, itemId, quantityForServings(db, itemId, probe).qty, new Map(), everything);
 
+
   const missing: Shortage[] = [...shortfalls.entries()].map(([shortId, short]) => {
     const shortItem = mustItem(db, shortId);
     return { itemId: shortId, name: shortItem.name, short, uom: shortItem.stockUom };
   });
-
-  const time = rollupTime(db, itemId);
 
   return {
     itemId,
@@ -281,7 +292,9 @@ export function feasibility(
     servings: maxFeasibleServings(db, itemId, probe, asOf, fromScratch),
     coverage: everything.size === 0 ? 1 : 1 - missing.length / everything.size,
     missing: missing.sort((a, b) => b.short - a.short),
-    criticalPathMin: time.criticalPathMin,
+    // Only the cooking that actually remains — a stocked sub-recipe is lifted
+    // off the shelf, not simmered again.
+    criticalPathMin: probed.minutes,
   };
 }
 
@@ -392,6 +405,9 @@ function produceInner(
   const consumed: ConsumedLine[] = [];
   const shortages: Shortage[] = [];
   let cost = 0;
+  // Anything cooked on the spot to satisfy this order was still cooked by this
+  // order, so its time belongs in the total.
+  let cascadedMinutes = 0;
 
   for (const component of recipe.components) {
     if (component.optional && !includeOptional) continue;
@@ -413,6 +429,7 @@ function produceInner(
         consumeImmediately: true,
       });
       cost += inner.cost;
+      cascadedMinutes += inner.minutes;
       shortages.push(...inner.shortages);
       consumed.push({
         itemId: child.id,
@@ -431,6 +448,7 @@ function produceInner(
     if (available + 1e-9 < need && isMade(child) && cascade) {
       const gap = need - available;
       const inner = produceInner(db, child.id, gap, { ...options, on, ref });
+      cascadedMinutes += inner.minutes;
       shortages.push(...inner.shortages);
       madeToOrder = true;
     }
@@ -483,7 +501,7 @@ function produceInner(
     consumed,
     ...(lotId ? { lotId } : {}),
     shortages,
-    minutes: minutes.total,
+    minutes: minutes.total + cascadedMinutes,
   };
 }
 

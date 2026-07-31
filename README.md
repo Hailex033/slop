@@ -45,7 +45,7 @@ expands those. That is the whole trick, and everything else falls out of it.
 ```bash
 npm install          # only @types/node and typescript, both dev-only
 npm run build
-npm test             # 141 tests, no runtime dependencies
+npm test             # 147 tests, no runtime dependencies
 
 node dist/src/cli.js init      # writes mise.db.json, seeded with a worked example
 node dist/src/cli.js tree lasagne
@@ -171,7 +171,9 @@ From there:
 - `mise feasible` answers "what can I make right now" by netting against stock
   at every level: a tub of ragù in the fridge counts as ragù rather than being
   exploded into mince you no longer have, while a shared ingredient is drawn
-  from one balance so two branches can't both be credited the same butter.
+  from one balance so two branches can't both be credited the same butter. The
+  time it quotes is the cooking that actually remains — a sauce that simmered
+  for two hours last week is lifted off the shelf, not simmered again.
 
 The loop closes: `shop --commit` raises purchase orders → `receive PO-0001`
 turns packs into lots with expiry dates → `cook` consumes them → `serve` takes
@@ -221,7 +223,7 @@ src/engine/       graph        low-level codes, cycles, where-used
 src/data/seed.ts  a worked example household
 src/cli.ts        the terminal front end
 web/              the browser front end, same engine
-tests/            141 tests
+tests/            147 tests
 ```
 
 The engine layer imports nothing from Node and nothing from npm, which is why

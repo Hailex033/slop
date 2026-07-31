@@ -500,3 +500,62 @@ test('a run of nothing is refused before it can touch the pantry', () => {
   assert.equal(database.ledger.length, ledgerBefore, 'and nothing was posted');
   assert.equal(onHand(database, 'loaf'), 0, 'no zero-quantity lot');
 });
+
+// ---------------------------------------------------------------------------
+// Time reflects the work that actually remains
+// ---------------------------------------------------------------------------
+
+/** A dish that is ten minutes of assembly around a two-hour sauce. */
+function slowSauceDb() {
+  return db(
+    [
+      purchased('tomato', {
+        purchase: { supplierId: 'shop', packQty: 1000, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+      }),
+      made('sauce'),
+      made('plate'),
+    ],
+    [
+      recipe('sauce', 100, [{ itemId: 'tomato', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'simmer', passiveMin: 120 }],
+      }),
+      recipe('plate', 100, [{ itemId: 'sauce', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'assemble', activeMin: 10 }],
+      }),
+    ],
+  );
+}
+
+test('a sub-recipe already made costs no time', () => {
+  const database = slowSauceDb();
+  receive(database, 'sauce', { qty: 100, on: '2026-07-01' });
+
+  const check = feasibility(database, 'plate', 1, '2026-07-02');
+  assert.ok(close(check.servings, 1, 1e-3));
+  assert.ok(close(check.criticalPathMin, 10), `only the assembly remains, got ${check.criticalPathMin}`);
+});
+
+test('a sub-recipe still to be made costs its time', () => {
+  const database = slowSauceDb();
+  receive(database, 'tomato', { qty: 1000, on: '2026-07-01' });
+
+  const check = feasibility(database, 'plate', 1, '2026-07-02');
+  assert.ok(close(check.criticalPathMin, 130), `got ${check.criticalPathMin}`);
+});
+
+test('cooking counts the time of everything it cooked on the way', () => {
+  const database = slowSauceDb();
+  receive(database, 'tomato', { qty: 1000, on: '2026-07-01' });
+
+  const result = produce(database, 'plate', 100, { on: '2026-07-02' });
+  assert.ok(result.consumed.some((line) => line.itemId === 'sauce' && line.madeToOrder));
+  assert.ok(close(result.minutes, 130), `the sauce was simmered by this call too, got ${result.minutes}`);
+});
+
+test('cooking with the sub-recipe on hand reports only its own time', () => {
+  const database = slowSauceDb();
+  receive(database, 'sauce', { qty: 100, on: '2026-07-01' });
+
+  const result = produce(database, 'plate', 100, { on: '2026-07-02' });
+  assert.ok(close(result.minutes, 10), `got ${result.minutes}`);
+});
