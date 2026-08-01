@@ -420,6 +420,14 @@ export function validate(db: Database): string[] {
     if (!findSupplier(db, order.supplierId)) {
       issues.push(`Purchase order "${order.id}" references unknown supplier "${order.supplierId}".`);
     }
+    // Order dates drive the netting windows; a malformed one silently
+    // distorts every comparison it takes part in.
+    if (!isIsoDate(order.orderedOn)) {
+      issues.push(`Purchase order "${order.id}" has an invalid orderedOn date "${order.orderedOn}".`);
+    }
+    if (!isIsoDate(order.expectedOn)) {
+      issues.push(`Purchase order "${order.id}" has an invalid expectedOn date "${order.expectedOn}".`);
+    }
     for (const line of order.lines) {
       if (!findItem(db, line.itemId)) {
         issues.push(`Purchase order "${order.id}" has a line for unknown item "${line.itemId}".`);
@@ -437,6 +445,18 @@ export function validate(db: Database): string[] {
   for (const order of db.productionOrders) {
     if (!findItem(db, order.itemId)) {
       issues.push(`Production order "${order.id}" references unknown item "${order.itemId}".`);
+    }
+    // A zero or negative batch cannot be cooked — produce refuses it — yet
+    // MRP and prep would keep processing the commitment forever, in a
+    // database doctor called valid.
+    if (!Number.isFinite(order.qty) || order.qty <= 0) {
+      issues.push(`Production order "${order.id}" has an invalid qty (${order.qty}).`);
+    }
+    if (!isIsoDate(order.dueOn)) {
+      issues.push(`Production order "${order.id}" has an invalid dueOn date "${order.dueOn}".`);
+    }
+    if (!isIsoDate(order.startOn)) {
+      issues.push(`Production order "${order.id}" has an invalid startOn date "${order.startOn}".`);
     }
   }
   // History references items too. The ledger is read-only, so a hole here

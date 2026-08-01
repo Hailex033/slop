@@ -201,6 +201,27 @@ test('history and order lines are integrity-checked too', () => {
   assert.ok(issues.some((i) => i.includes('invalid packs (0)')));
 });
 
+test('order quantities and dates are integrity-checked too', () => {
+  const database = db([purchased('flour')]);
+  // Doctor used to approve these; executeOrder then refused the zero batch
+  // while MRP and prep kept processing the commitment forever.
+  database.productionOrders.push({
+    id: 'PRD-1', itemId: 'flour', qty: 0, dueOn: '2026-07-03', startOn: '2026-07-03', status: 'open',
+  });
+  database.productionOrders.push({
+    id: 'PRD-2', itemId: 'flour', qty: 100, dueOn: '2026-02-30' as never, startOn: '2026-07-03', status: 'open',
+  });
+  database.purchaseOrders.push({
+    id: 'PO-1', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: 'someday' as never, status: 'open',
+    lines: [{ itemId: 'flour', packs: 1, unitPrice: 1 }],
+  });
+
+  const issues = validate(database);
+  assert.ok(issues.some((i) => i.includes('invalid qty (0)')), JSON.stringify(issues));
+  assert.ok(issues.some((i) => i.includes('invalid dueOn date "2026-02-30"')));
+  assert.ok(issues.some((i) => i.includes('invalid expectedOn date "someday"')));
+});
+
 test('two recipes for one item is an integrity problem, not a quiet last-wins', () => {
   const database = db(
     [purchased('flour'), made('bread')],
