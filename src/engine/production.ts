@@ -757,7 +757,17 @@ export function serve(
   // orders settled — exactly as `receive PRD-x` would. A serve with no plan
   // behind it stays ad-hoc and leaves the order book alone.
   const fulfillingPlan = entries.length > 0;
-  const servedIds = entries.map((entry) => entry.id);
+  // The pegs are the entries these portions actually reach — the same
+  // earliest-first walk that marks them served afterwards. A due entry the
+  // portions never get to is not being fulfilled, and a batch committed
+  // for it must not be cooked, or closed, on its behalf.
+  const servedIds: string[] = [];
+  let claimed = 0;
+  for (const entry of entries) {
+    if (claimed + 1e-9 >= servings) break;
+    servedIds.push(entry.id);
+    claimed += remainingServings(entry);
+  }
   const result = transactionally(db, () =>
     serveInner(db, itemId, servings, {
       settleOrders: fulfillingPlan,

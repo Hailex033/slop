@@ -915,6 +915,44 @@ test("serving a meal added later leaves other meals' commitments standing", () =
   assert.ok(close(onHand(database, 'dish'), 0), 'the ad-hoc making fed only this meal');
 });
 
+test('a small serve does not cook batches pegged to meals it never reaches', () => {
+  const database = nestedDb();
+  // Committed for Saturday's dinner alone…
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-04', slot: 'dinner', itemId: 'dish', servings: 2 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const dishOrder = database.productionOrders.find((o) => o.itemId === 'dish')!;
+  assert.deepEqual([...(dishOrder.pegging ?? [])], ['MP-1']);
+
+  // …then Thursday's forgotten lunch is logged after the fact. Both are
+  // due by Saturday, and the portions go to the earlier entry — Saturday's
+  // batch is pegged to a meal these portions never reach, and must stay
+  // committed to it rather than be cooked and closed on the lunch's behalf.
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-02', slot: 'lunch', itemId: 'dish', servings: 2 });
+  const result = serve(database, 'dish', 2, { on: '2026-07-04' });
+
+  assert.equal(result.servedPlanEntryId, 'MP-2', 'the earlier entry takes the portions');
+  assert.equal(database.mealPlan.find((e) => e.id === 'MP-1')!.servedOn, undefined);
+  assert.equal(dishOrder.status, 'open', "Saturday's batch still stands");
+  assert.ok(close(dishOrder.qty, 750), `got ${dishOrder.qty}`);
+});
+
+test('a negative order price is rejected before it poisons the lot cost', () => {
+  const database = db([purchased('flour')]);
+  database.purchaseOrders.push({
+    id: 'PO-1', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
+    lines: [{ itemId: 'flour', packs: 2, unitPrice: -1, packQty: 100, packUom: 'g' }],
+  });
+
+  // A negative price would flow into the lot's unit cost and turn the
+  // pantry valuation — and every meal drawing on the lot — negative.
+  assert.throws(() => receivePurchaseOrder(database, 'PO-1', '2026-07-02'), /invalid price/);
+  assert.equal(database.purchaseOrders[0]!.status, 'open', 'the order awaits a fixed line');
+  assert.equal(database.lots.length, 0, 'nothing booked at a nonsense cost');
+});
+
 test('a plain serve cooks a committed batch with its committed garnish', () => {
   const database = db(
     [purchased('polentabase'), purchased('shavings2'), made('bowl')],

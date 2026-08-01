@@ -448,6 +448,10 @@ export function validate(db: Database): string[] {
       if (line.packQty !== undefined && (!Number.isFinite(line.packQty) || line.packQty <= 0)) {
         issues.push(`Purchase order "${order.id}" has a line with invalid packQty (${line.packQty}).`);
       }
+      // Zero is a price; a negative one turns lots and meals negative.
+      if (!Number.isFinite(line.unitPrice) || line.unitPrice < 0) {
+        issues.push(`Purchase order "${order.id}" has a line with an invalid unitPrice (${line.unitPrice}).`);
+      }
     }
   }
   for (const order of db.productionOrders) {

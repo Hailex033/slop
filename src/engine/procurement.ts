@@ -362,6 +362,15 @@ export function receivePurchaseOrder(
             `cannot receive it until one is restored.`,
         );
       }
+      // Zero is a price; a negative or non-finite one would flow into the
+      // lot's unit cost and turn the pantry's valuation — and the actual
+      // cost of every meal drawing on it — negative.
+      if (!Number.isFinite(line.unitPrice) || line.unitPrice < 0) {
+        throw new MiseError(
+          `Order "${order.id}" line for "${item.name}" has an invalid price (${line.unitPrice}) — ` +
+            `fix the line before receiving.`,
+        );
+      }
       const qty = convert(line.packs * packQty, packUom, item.stockUom, conversionContext(item));
       // The same principle as the missing pack size above: a line that
       // books nothing must not be skipped on the way to marking the whole

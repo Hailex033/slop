@@ -208,12 +208,16 @@ test('history and order lines are integrity-checked too', () => {
   } as never);
   database.purchaseOrders.push({
     id: 'PO-1', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
-    lines: [{ itemId: 'flour', packs: 0, unitPrice: 1 }],
+    lines: [
+      { itemId: 'flour', packs: 0, unitPrice: 1 },
+      { itemId: 'flour', packs: 1, unitPrice: -1 },
+    ],
   });
 
   const issues = validate(database);
   assert.ok(issues.some((i) => i.includes('Ledger entry "TXN-1"')), JSON.stringify(issues));
   assert.ok(issues.some((i) => i.includes('invalid packs (0)')));
+  assert.ok(issues.some((i) => i.includes('invalid unitPrice (-1)')));
 });
 
 test('order quantities and dates are integrity-checked too', () => {

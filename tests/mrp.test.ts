@@ -142,6 +142,22 @@ test('a committed optional policy survives replanning a stocked child', () => {
   assert.equal(relishOrder.includeOptional, true);
 });
 
+test('--ignore-stock still rebuilds safety stock', () => {
+  const database = db([purchased('salt2', { safetyStock: 500 })]);
+  receive(database, 'salt2', { qty: 1000, on: '2026-07-01' });
+
+  // Fully stocked and nothing planned: a normal run has nothing to do…
+  const normal = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(!normal.purchases.some((p) => p.itemId === 'salt2'));
+
+  // …but "plan as if the pantry were empty" must buy the staples an
+  // actually empty pantry would need — skipping every safety-stock-only
+  // item is exactly the provisioning list going out blank.
+  const bare = runMrp(database, { asOf: '2026-07-01', horizonDays: 7, ignoreStock: true });
+  const salt = bare.purchases.find((p) => p.itemId === 'salt2');
+  assert.ok(salt && close(salt.qty, 500), `got ${salt?.qty}`);
+});
+
 test('a firm order keeps every meal it was committed for on the trail', () => {
   const database = nestedDb();
   database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'lunch', itemId: 'dish', servings: 2 });

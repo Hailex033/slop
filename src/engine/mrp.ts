@@ -249,10 +249,13 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
     const firmOrders = firmProductionOrders(db, itemId, horizonEnd);
 
     // An item can also need attention with nothing planned at all: a buffer
-    // that has been eaten into still has to be rebuilt.
+    // that has been eaten into still has to be rebuilt — and a run planning
+    // from an empty pantry rebuilds every buffer, because that is what an
+    // actually empty pantry would need.
     const safety = isStocked(item) ? (item.safetyStock ?? 0) : 0;
     const needsTopUp =
-      !options.ignoreStock && safety > 0 && availableOn(db, itemId, horizonEnd) + 1e-9 < safety;
+      safety > 0 &&
+      (options.ignoreStock === true || availableOn(db, itemId, horizonEnd) + 1e-9 < safety);
 
     if (demands.length === 0 && firmOrders.length === 0 && !needsTopUp) continue;
 
@@ -308,7 +311,9 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       // of the horizon, after everything planned has been eaten — but a buffer
       // that is *already* short is short today, and telling someone to restock
       // on day seven leaves the minimum unmet all week.
-      const shortNow = !options.ignoreStock && availableOn(db, itemId, asOf) + 1e-9 < safety;
+      // The notionally empty pantry of --ignore-stock is short *now* too.
+      const shortNow =
+        options.ignoreStock === true || availableOn(db, itemId, asOf) + 1e-9 < safety;
       requirements.push({
         itemId,
         qty: safety,
