@@ -718,6 +718,40 @@ test('a merged run consumes its fixed inputs once, however many meals share it',
   assert.ok(close(onHand(database, 'sachet'), 0), 'one making, one sachet');
 });
 
+test('an early execution does not bank perishable surplus past its keeping', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'dish' ? { ...item, shelfLifeDays: 1 }
+    : item.id === 'sauce' ? { ...item, shelfLifeDays: 2 }
+    : item,
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-05', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 4000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 4000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 4000, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const dishOrders = database.productionOrders
+    .filter((o) => o.itemId === 'dish')
+    .sort((a, b) => a.dueOn.localeCompare(b.dueOn));
+  const sauceOrder = database.productionOrders.find((o) => o.itemId === 'sauce')!;
+  assert.ok(close(sauceOrder.qty, 2000), 'made on schedule, one batch keeps for both dinners');
+
+  // Cooked two days ahead of plan, the batch only keeps until the 3rd —
+  // banking the second dinner's half now would leave it spoiled by the 5th
+  // with the ingredients for a fresh one already eaten.
+  executeOrder(database, dishOrders[0]!.id, { on: '2026-07-01' });
+  assert.equal(sauceOrder.status, 'open', 'the far half of the run still stands');
+  assert.ok(close(sauceOrder.qty, 1000), `got ${sauceOrder.qty}`);
+  assert.ok(close(onHand(database, 'sauce'), 0), 'no doomed surplus on the shelf');
+
+  // The second dinner cooks its half fresh, on its own schedule.
+  const second = executeOrder(database, dishOrders[1]!.id, { on: '2026-07-05' });
+  assert.equal(second.shortages.length, 0);
+  assert.equal(sauceOrder.status, 'received');
+});
+
 test('a stocked sub-recipe under a phantom is banked and issued, not lost', () => {
   const database = db(
     [purchased('chili'), made('paste'), phantom('blend'), made('dish')],

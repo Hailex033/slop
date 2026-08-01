@@ -59,6 +59,54 @@ test('a phantom on the meal plan is a problem, not a shopping trip', () => {
   assert.throws(() => commitProduction(database, result), /problems/);
 });
 
+test('two same-day makings of a phantom each plan their fixed dose', () => {
+  const database = db(
+    [purchased('herb'), purchased('sachet', { stockUom: 'ea' }), phantom('blend'), made('soup'), made('stew')],
+    [
+      recipe('blend', 100, [
+        { itemId: 'herb', qty: 100, uom: 'g' },
+        { itemId: 'sachet', qty: 1, uom: 'ea', scalable: false },
+      ]),
+      recipe('soup', 1000, [{ itemId: 'blend', qty: 100, uom: 'g' }]),
+      recipe('stew', 1000, [{ itemId: 'blend', qty: 150, uom: 'g' }]),
+    ],
+  );
+  planned(database, 'soup', 1, '2026-07-03');
+  planned(database, 'stew', 1, '2026-07-03');
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const sachet = result.lines.find((line) => line.itemId === 'sachet')!;
+  const herb = result.lines.find((line) => line.itemId === 'herb')!;
+
+  // Execution makes the blend inside each dish separately: two pans on one
+  // day are two sachets — while the scalable herb is simply the sum.
+  assert.ok(close(sachet.gross, 2), `got ${sachet.gross}`);
+  assert.ok(close(herb.gross, 250), `got ${herb.gross}`);
+});
+
+test('a committed optional policy survives beneath a phantom', () => {
+  const database = db(
+    [purchased('base'), purchased('truffle'), phantom('mix'), made('plate')],
+    [
+      recipe('mix', 100, [
+        { itemId: 'base', qty: 100, uom: 'g' },
+        { itemId: 'truffle', qty: 5, uom: 'g', optional: true },
+      ]),
+      recipe('plate', 1000, [{ itemId: 'mix', qty: 100, uom: 'g' }]),
+    ],
+  );
+  planned(database, 'plate', 1, '2026-07-03');
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7, includeOptional: true }));
+
+  // A later plain run. The order was committed with its garnish, and the
+  // garnish lives below a required phantom: dropping the flag on the way
+  // down would shop for a batch executeOrder will refuse to cook short.
+  const rerun = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const truffle = rerun.lines.find((line) => line.itemId === 'truffle');
+  assert.ok(truffle, 'the garnish is still in the plan');
+  assert.ok(close(truffle!.gross, 5), `got ${truffle!.gross}`);
+});
+
 test('stock of a made sub-recipe stops it being made again', () => {
   const database = nestedDb();
   planned(database, 'dish', 4, '2026-07-02');

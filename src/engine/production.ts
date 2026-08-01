@@ -591,11 +591,16 @@ function produceInner(
         // to be cooked again for the next parent — a second dose of fixed
         // inputs that were planned, and bought, once. Round the cascade up
         // to the boundary of the last order it touches; the surplus is
-        // banked for the siblings the merged run was planned to feed, and
-        // the run's own planning proved it keeps until they need it.
+        // banked for the siblings the merged run was planned to feed.
         let boundary = 0;
         for (const order of openOrdersFor(db, child.id)) {
           if (boundary + 1e-9 >= gap) break;
+          // The merge behind a multi-meal order was proved from its planned
+          // start: made *then*, the batch keeps for every meal inside it.
+          // Made early, it may not — so an early execution of a perishable
+          // cooks only its own share and leaves the rest of the run
+          // standing, still committed to the meals the proof was anchored to.
+          if (child.shelfLifeDays !== undefined && on < order.startOn) break;
           boundary += order.qty;
         }
         if (boundary > gap) gap = boundary;
@@ -813,8 +818,9 @@ function openOrdersFor(db: Database, itemId: ItemId): ProductionOrder[] {
  * child's not-yet-opened order is exactly the commitment that work met.
  * (Freshness is no objection here — the cascaded output went straight into
  * the parent, not onto a shelf to age.) An order the cooked quantity only
- * partially covers — reachable only for off-plan quantities, since a
- * committed cascade rounds itself up to order boundaries — is *reduced*,
+ * partially covers — an off-plan quantity, or an early execution of a
+ * perishable run, since a committed cascade otherwise rounds itself up to
+ * order boundaries — is *reduced*,
  * not left standing: there is no lot for a later planning run to
  * reconcile, so the remainder is the only part of the commitment still
  * real.

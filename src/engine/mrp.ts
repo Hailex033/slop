@@ -52,6 +52,13 @@ export interface Demand {
    */
   readonly sources: readonly string[];
   readonly level: number;
+  /**
+   * The optional-components policy of the making that raised this demand.
+   * A firm order committed with its garnish keeps demanding that garnish
+   * at every level beneath it, whatever flag the current run uses. Unset
+   * means the current run's own policy applies.
+   */
+  readonly includeOptional?: boolean;
 }
 
 export interface PlannedPurchase {
@@ -264,19 +271,25 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
         action: 'phantom',
       });
 
-      // A phantom is made fresh each time it is wanted, so it keeps for zero
-      // days: every distinct date is its own making. Collapsing them onto the
-      // earliest date would buy perishables far too early for the later meal,
-      // and would count a `scalable: false` component once for what are really
-      // several separate batches.
-      const passes = batchShortfalls(
-        [...demands]
-          .sort((a, b) => a.dueOn.localeCompare(b.dueOn))
-          .map((demand) => ({ qty: demand.qty, dueOn: demand.dueOn, sources: demand.sources })),
-        0,
-      );
-      for (const pass of passes) {
-        explodeOneLevel(db, itemId, pass.qty, pass.dueOn, level, pass.sources, addDemand, options.includeOptional, reportMissing);
+      // A phantom is made fresh *inside* whatever consumes it — one inline
+      // making per demand, on that demand's own clock. Two parents due the
+      // same day are still two pans, two bay leaves: merging their demand
+      // would plan one dose of every `scalable: false` component for what
+      // execution performs as separate makings, and the second would cook
+      // short. Each demand also keeps the optional policy of the making
+      // that raised it, so a committed garnish survives the descent.
+      for (const demand of [...demands].sort((a, b) => a.dueOn.localeCompare(b.dueOn))) {
+        explodeOneLevel(
+          db,
+          itemId,
+          demand.qty,
+          demand.dueOn,
+          level,
+          demand.sources,
+          addDemand,
+          demand.includeOptional ?? options.includeOptional,
+          reportMissing,
+        );
       }
       continue;
     }
@@ -741,6 +754,9 @@ function explodeOneLevel(
       dueOn,
       sources: pegging.length > 0 ? pegging : [itemId],
       level: level + 1,
+      // The policy this level exploded under descends with the demand, so
+      // a committed batch's garnish survives however deep the recipe goes.
+      includeOptional,
     });
   }
 }
