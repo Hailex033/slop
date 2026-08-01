@@ -1259,11 +1259,15 @@ const commands: Record<string, Command> = {
       const mrp = runMrp(ctx.db);
       const list = shoppingList(ctx.db, mrp);
       const soon = expiring(ctx.db, 3);
+      // The same remaining-portions predicate the demand planner and the
+      // plan listing use: a meal counted out by hand-edit is done whether
+      // or not its completion marker was written.
+      const meals = ctx.db.mealPlan.filter((e) => remainingServings(e) > 1e-9 && e.date >= today());
 
       out(f.heading('Household'));
       out();
       out(`  Pantry value       ${f.money(stockValue(ctx.db), currency)} across ${stockReport(ctx.db).length} items`);
-      out(`  Planned meals      ${ctx.db.mealPlan.filter((e) => !e.servedOn && e.date >= today()).length} upcoming`);
+      out(`  Planned meals      ${meals.length} upcoming`);
       out(`  To buy             ${list.lines.length} lines, ${f.money(list.total, currency)}`);
       // Committed batches are supply to the planning run, not entries in
       // mrp.production — but they are still outstanding cooking, exactly as
@@ -1275,7 +1279,6 @@ const commands: Record<string, Command> = {
           (soon.length > 0 ? f.style(` (${soon.map((s) => s.item.name).slice(0, 4).join(', ')})`, 'grey') : ''),
       );
 
-      const meals = ctx.db.mealPlan.filter((e) => !e.servedOn && e.date >= today());
       const weekCost = meals.reduce((sum, entry) => {
         const target = quantityForServings(ctx.db, entry.itemId, remainingServings(entry));
         return sum + costOf(ctx.db, entry.itemId, target.qty, target.uom).total;

@@ -102,6 +102,29 @@ test('a late line is a conflict to resolve, not an order to repeat', () => {
   );
 });
 
+test('a stale shopping list cannot be committed after its trip has passed', () => {
+  const database = db([
+    purchased('cheese', {
+      purchase: { supplierId: 'shop', packQty: 100, packUom: 'g', packPrice: 2, leadTimeDays: 5 },
+    }),
+  ]);
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-12', slot: 'dinner', itemId: 'cheese', servings: 200 });
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 14 }));
+
+  // Planned on the 1st, the five-day lead time makes the 7th the last day
+  // to order. Committing the same list on the 9th would slide orderedOn
+  // forward and book an arrival after the meal — firm supply the next run
+  // could never allocate, alongside the replacement it must plan anyway.
+  assert.throws(() => raisePurchaseOrders(database, list, '2026-07-09'), /stale/);
+  assert.equal(database.purchaseOrders.length, 0, 'nothing was half-committed');
+
+  // A fresh plan reports the same situation honestly: a late line and a
+  // conflict to decide on, not an order that cannot arrive in time.
+  const rerun = runMrp(database, { asOf: '2026-07-09', horizonDays: 14 });
+  assert.deepEqual(raisePurchaseOrders(database, shoppingList(database, rerun), '2026-07-09'), []);
+  assert.equal(rerun.conflicts.length, 1, 'the decision stays on the table');
+});
+
 test('a pack-size edit after ordering does not change what was ordered', () => {
   const database = nestedDb();
   database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'cheese', servings: 200 });

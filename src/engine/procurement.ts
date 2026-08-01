@@ -9,7 +9,7 @@
  */
 
 import { conversionContext, findSupplier, mustItem } from '../domain/db.js';
-import { addDays, maxDate, today, type IsoDate } from '../domain/date.js';
+import { addDays, today, type IsoDate } from '../domain/date.js';
 import { MiseError, NotFoundError } from '../domain/errors.js';
 import { nextId } from '../domain/ids.js';
 import { convert, type UomCode } from '../domain/units.js';
@@ -268,13 +268,31 @@ export function raisePurchaseOrders(
     else trips.set(key, { supplierId: line.supplierId, orderBy: line.orderBy, leadTimeDays, lines: [line] });
   }
 
+  // A trip whose shop day has already passed cannot be committed as if it
+  // had been taken. Sliding `orderedOn` forward to the commit date keeps
+  // the plan's lead-time arithmetic but not its conclusion: the order
+  // books an arrival after the demand it was scheduled to serve — firm
+  // supply MRP can never allocate, next to the replacement purchase it
+  // then plans anyway. The list is stale; nothing is committed, and a
+  // fresh plan reschedules the missed trip or reports its conflict.
+  for (const trip of trips.values()) {
+    if (trip.orderBy < on) {
+      const supplier = findSupplier(db, trip.supplierId)?.name ?? trip.supplierId;
+      throw new MiseError(
+        `The "${supplier}" trip needed ordering by ${trip.orderBy} and this commit is dated ${on} — ` +
+          `the shopping list is stale; re-run \`mise shop\` for a fresh plan.`,
+      );
+    }
+  }
+
   const created: PurchaseOrder[] = [];
   for (const trip of [...trips.values()].sort((a, b) => a.orderBy.localeCompare(b.orderBy))) {
     // The shopping line already worked out the first day this supplier can
-    // actually be visited. Stamping the order with today + lead time instead
-    // would claim delivery on a day the shop is shut, and the next planning
-    // run would count it as supply and lose the conflict.
-    const orderedOn = maxDate(on, trip.orderBy);
+    // actually be visited — an early commit still carries the scheduled
+    // trip, not today + lead time, which would claim delivery on a day the
+    // shop is shut, and the next planning run would count it as supply and
+    // lose the conflict.
+    const orderedOn = trip.orderBy;
     const order: PurchaseOrder = {
       id: nextId('PO', [...db.purchaseOrders, ...created]),
       supplierId: trip.supplierId,
