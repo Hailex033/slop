@@ -4,7 +4,7 @@ import { seedDatabase } from '../src/data/seed.js';
 import { onHand, onOrder, receive } from '../src/engine/inventory.js';
 import { commitProduction, runMrp } from '../src/engine/mrp.js';
 import { bySupplier, packsFor, raisePurchaseOrders, receivePurchaseOrder, shoppingList } from '../src/engine/procurement.js';
-import { cookableNow, executeOrder, feasibility, prepSchedule, produce, serve } from '../src/engine/production.js';
+import { cookableNow, executeOrder, feasibility, prepSchedule, produce, raiseProductionOrder, serve } from '../src/engine/production.js';
 import { CycleError, MiseError, ShortageError } from '../src/domain/errors.js';
 import { close, db, made, nestedDb, purchased, recipe } from './helpers.js';
 
@@ -452,6 +452,34 @@ test('a receipt line with no pack terms anywhere is refused, keeping the order o
   assert.equal(database.lots.length, 0, 'nothing was booked in');
 });
 
+test('feasibility times the servings it offers, not the probe', () => {
+  const database = db(
+    [purchased('oats'), made('porridge')],
+    [
+      recipe('porridge', 100, [{ itemId: 'oats', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'stir', activeMin: 10 }],
+      }),
+    ],
+  );
+  receive(database, 'oats', { qty: 400, on: '2026-07-01' });
+
+  const result = feasibility(database, 'porridge', 1, '2026-07-02', true);
+  assert.ok(Math.abs(result.servings - 4) < 0.01, `got ${result.servings}`);
+  // Four batches on offer means four rounds of stirring — not the probe's one.
+  assert.ok(Math.abs(result.criticalPathMin - 40) < 0.5, `got ${result.criticalPathMin}`);
+});
+
+test('a cancelled production order cannot be executed', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  const order = raiseProductionOrder(database, 'sauce', 1000, '2026-07-03');
+  order.status = 'cancelled';
+
+  assert.throws(() => executeOrder(database, order.id), /cancelled/);
+  assert.equal(onHand(database, 'butter'), 500, 'nothing was cooked');
+});
+
 test('feasibility keeps counting past the old search ceiling', () => {
   const database = db(
     [purchased('oats'), made('porridge')],
@@ -761,7 +789,9 @@ test('a sub-recipe already made costs no time', () => {
 
 test('a sub-recipe still to be made costs its time', () => {
   const database = slowSauceDb();
-  receive(database, 'tomato', { qty: 1000, on: '2026-07-01' });
+  // Exactly one serving's worth, so the servings offered equal the probe and
+  // the time is the probe's: the sauce's simmer plus the plate's assembly.
+  receive(database, 'tomato', { qty: 100, on: '2026-07-01' });
 
   const check = feasibility(database, 'plate', 1, '2026-07-02');
   assert.ok(close(check.criticalPathMin, 130), `got ${check.criticalPathMin}`);

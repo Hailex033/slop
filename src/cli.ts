@@ -84,7 +84,25 @@ function isValue(token: string | undefined): token is string {
   return token !== undefined && (!token.startsWith('-') || /^-\d/.test(token));
 }
 
-function parseArgs(argv: readonly string[]): Args {
+/**
+ * Flags that never take a value, on any command. A flag missing from this
+ * list (and from the command's own `booleanFlags`) will consume the next
+ * token as its value — which is exactly what turned `--optional lasagne`
+ * into an optional of "lasagne" and a command with no item.
+ */
+const COMMON_BOOLEAN_FLAGS = [
+  'optional',
+  'dry',
+  'force',
+  'commit',
+  'low',
+  'almost',
+  'ignore-stock',
+  'bare',
+  'no-color',
+] as const;
+
+export function parseArgs(argv: readonly string[], booleans: ReadonlySet<string> = new Set()): Args {
   const positionals: string[] = [];
   const flags: Record<string, string | boolean> = {};
 
@@ -95,7 +113,7 @@ function parseArgs(argv: readonly string[]): Args {
       const key = rawKey!;
       if (inlineValue !== undefined) {
         flags[key] = inlineValue;
-      } else if (isValue(argv[i + 1])) {
+      } else if (!booleans.has(key) && isValue(argv[i + 1])) {
         flags[key] = argv[i + 1]!;
         i += 1;
       } else {
@@ -103,7 +121,7 @@ function parseArgs(argv: readonly string[]): Args {
       }
     } else if (token.startsWith('-') && token.length > 1 && !/^-\d/.test(token)) {
       const key = SHORT[token.slice(1)] ?? token.slice(1);
-      if (isValue(argv[i + 1])) {
+      if (!booleans.has(key) && isValue(argv[i + 1])) {
         flags[key] = argv[i + 1]!;
         i += 1;
       } else {
@@ -201,6 +219,12 @@ type Command = {
   readonly summary: string;
   readonly group: 'recipes' | 'pantry' | 'planning' | 'admin';
   readonly needsDb?: boolean;
+  /**
+   * Valueless flags specific to this command, beyond COMMON_BOOLEAN_FLAGS.
+   * Needed when a name is boolean here but takes a value elsewhere —
+   * `tree --cost` shows costs, `stock add --cost 2` records £2.
+   */
+  readonly booleanFlags?: readonly string[];
   readonly run: (ctx: Ctx) => void;
 };
 
@@ -234,6 +258,7 @@ const commands: Record<string, Command> = {
     usage: 'mise tree <item> [-s servings | -q qty -u uom] [--cost] [--depth N] [--optional] [--stop <item,...>]',
     summary: 'Explode a recipe into its full recursive tree.',
     group: 'recipes',
+    booleanFlags: ['cost'],
     run: (ctx) => {
       const ref = ctx.args.positionals[0];
       if (!ref) throw new MiseError('Usage: mise tree <item>');
@@ -1221,7 +1246,7 @@ export function main(argv: readonly string[]): number {
     return 1;
   }
 
-  const args = parseArgs(rest);
+  const args = parseArgs(rest, new Set([...COMMON_BOOLEAN_FLAGS, ...(command.booleanFlags ?? [])]));
   if (boolFlag(args, 'no-color')) f.setColour(false);
 
   const path = stringFlag(args, 'db') ?? defaultDbPath();

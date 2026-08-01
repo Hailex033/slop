@@ -333,15 +333,23 @@ export function feasibility(
     return { itemId: shortId, name: shortItem.name, short, uom: shortItem.stockUom };
   });
 
+  const servings = maxFeasibleServings(db, itemId, probe, asOf, fromScratch);
+  // The time answers for the servings on offer, not the probe: "you can make
+  // forty" next to one batch's minutes is an invitation to a very long
+  // evening. Only the cooking that actually remains counts — a stocked
+  // sub-recipe is lifted off the shelf, not simmered again.
+  const minutes =
+    Math.abs(servings - probe) < 1e-9
+      ? probed.minutes
+      : shortfallsFor(db, itemId, servings, asOf, fromScratch).minutes;
+
   return {
     itemId,
     name: item.name,
-    servings: maxFeasibleServings(db, itemId, probe, asOf, fromScratch),
+    servings,
     coverage: everything.size === 0 ? 1 : 1 - missing.length / everything.size,
     missing: missing.sort((a, b) => b.short - a.short),
-    // Only the cooking that actually remains — a stocked sub-recipe is lifted
-    // off the shelf, not simmered again.
-    criticalPathMin: probed.minutes,
+    criticalPathMin: minutes,
   };
 }
 
@@ -669,6 +677,9 @@ export function executeOrder(db: Database, orderId: string, options: ProduceOpti
   const order = db.productionOrders.find((o) => o.id === orderId);
   if (!order) throw new NotFoundError('production order', orderId);
   if (order.status === 'received') throw new MiseError(`Production order "${orderId}" is already done.`);
+  // The same rule the purchase-order receipt applies: a cancelled order is a
+  // decision already made, not a batch waiting to be cooked.
+  if (order.status === 'cancelled') throw new MiseError(`Production order "${orderId}" was cancelled.`);
   const result = produce(db, order.itemId, order.qty, { ...options, ref: orderId });
   order.status = 'received';
   return result;
