@@ -153,6 +153,54 @@ test('an unresolved line is never committed into an order', () => {
   );
 });
 
+test('serving a planned meal retires its demand', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 500, on: '2026-06-30' });
+
+  const result = serve(database, 'dish', 4, { on: '2026-07-02' });
+  assert.equal(result.servedPlanEntryId, 'MP-1');
+
+  // The food is eaten; re-planning must not buy and cook a replacement.
+  const rerun = runMrp(database, { asOf: '2026-07-02', horizonDays: 7 });
+  assert.ok(!rerun.production.some((order) => order.itemId === 'dish'), 'not planned again');
+
+  // An entry for a future date is untouched by today's serving.
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-05', slot: 'dinner', itemId: 'dish', servings: 4 });
+  const later = serve(database, 'dish', 4, { on: '2026-07-03', allowShortages: true });
+  assert.equal(later.servedPlanEntryId, undefined, 'nothing due on or before the 3rd matches');
+  assert.equal(database.mealPlan.find((e) => e.id === 'MP-2')!.servedOn, undefined);
+});
+
+test('a committed plan keeps its optional policy', () => {
+  const database = db(
+    [purchased('base'), purchased('garnish'), made('plate')],
+    [
+      recipe('plate', 1000, [
+        { itemId: 'base', qty: 800, uom: 'g' },
+        { itemId: 'garnish', qty: 50, uom: 'g', optional: true },
+      ]),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'plate', servings: 1 });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7, includeOptional: true }));
+  const order = database.productionOrders[0]!;
+  assert.equal(order.includeOptional, true);
+
+  // A later default run still buys the garnish the commitment includes…
+  const rerun = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(rerun.purchases.some((line) => line.itemId === 'garnish'), 'the committed garnish is still bought');
+
+  // …and executing the order issues it.
+  receive(database, 'base', { qty: 1000, on: '2026-07-01' });
+  receive(database, 'garnish', { qty: 100, on: '2026-07-01' });
+  const result = executeOrder(database, order.id, { on: '2026-07-03' });
+  assert.ok(result.consumed.some((line) => line.itemId === 'garnish'), 'cooked as committed');
+});
+
 test('a forced serve of a purchased item records the gap instead of refusing', () => {
   const database = db([purchased('bread', { shelfLifeDays: 4 })]);
   receive(database, 'bread', { qty: 100, on: '2026-07-01' });

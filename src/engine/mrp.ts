@@ -147,7 +147,8 @@ export function demandFromPlan(
 ): Demand[] {
   const until = addDays(from, horizonDays - 1);
   return entries
-    .filter((entry) => entry.date >= from && entry.date <= until)
+    // A served entry is history, not demand — the food is already eaten.
+    .filter((entry) => !entry.servedOn && entry.date >= from && entry.date <= until)
     .map((entry) => ({
       itemId: entry.itemId,
       qty: quantityForServings(db, entry.itemId, entry.servings).qty,
@@ -307,7 +308,10 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       // An overdue order cooks today, so its ingredients are needed today —
       // not on the startOn that already slipped past, where stock received
       // since then is invisible to the dated allocator and gets bought twice.
-      explodeOneLevel(db, itemId, firm.qty, maxDate(asOf, firm.startOn), level, [firm.id], addDemand, options.includeOptional, reportMissing);
+      // The order's own optional policy governs its components: a batch
+      // committed with its garnish keeps demanding the garnish, whatever
+      // flag this run happens to use.
+      explodeOneLevel(db, itemId, firm.qty, maxDate(asOf, firm.startOn), level, [firm.id], addDemand, firm.includeOptional === true, reportMissing);
     }
 
     if (net <= 1e-9) continue;
@@ -748,6 +752,9 @@ export function commitProduction(db: Database, result: MrpResult): ProductionOrd
       dueOn: planned.dueOn,
       startOn: planned.startOn,
       status: 'open',
+      // The plan's optional policy travels with the commitment, so later
+      // runs and the eventual execution cook the batch that was planned.
+      includeOptional: result.includeOptional,
       ...(planned.pegging[0] ? { pegging: planned.pegging[0] } : {}),
     };
     created.push(order);

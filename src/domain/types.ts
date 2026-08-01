@@ -201,6 +201,12 @@ export interface MealPlanEntry {
   readonly slot: MealSlot;
   readonly itemId: ItemId;
   readonly servings: number;
+  /**
+   * Set when the meal has actually been served. A served entry is history,
+   * not demand: without this, serving tonight's dinner and re-running MRP
+   * planned a replacement batch for food already eaten.
+   */
+  servedOn?: IsoDate;
   readonly note?: string;
 }
 
@@ -247,6 +253,13 @@ export interface ProductionOrder {
   status: OrderStatus;
   /** The meal plan entry or parent order that created the demand. */
   readonly pegging?: string;
+  /**
+   * The optional-components policy of the run that committed this order.
+   * Planning and execution both reuse it: a batch committed with its
+   * garnish keeps its garnish, whatever flag a later run happens to use.
+   * Absent on orders saved before this was recorded — treated as false.
+   */
+  readonly includeOptional?: boolean;
 }
 
 export interface HouseholdMember {

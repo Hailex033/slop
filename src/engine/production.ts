@@ -77,7 +77,8 @@ export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
   for (const order of db.productionOrders) {
     if (order.status !== 'open') continue;
     if (order.startOn > horizonEnd) continue;
-    add(firmPrepTask(db, order, codes.get(order.itemId) ?? 0, mrp.asOf, mrp.includeOptional));
+    // Each firm order keeps the optional policy it was committed with.
+    add(firmPrepTask(db, order, codes.get(order.itemId) ?? 0, mrp.asOf, order.includeOptional === true));
   }
 
   return [...byDate.entries()]
@@ -443,6 +444,8 @@ export interface ProductionResult {
   readonly lotId?: string;
   readonly shortages: readonly Shortage[];
   readonly minutes: number;
+  /** The meal plan entry this serving fulfilled, when one matched. */
+  readonly servedPlanEntryId?: string;
 }
 
 export interface ProduceOptions {
@@ -455,6 +458,12 @@ export interface ProduceOptions {
   readonly ref?: string;
   /** Don't book the output into stock — used when a dish is eaten immediately. */
   readonly consumeImmediately?: boolean;
+  /**
+   * Serving only: the meal plan entry this serving fulfils. Omitted, the
+   * earliest unserved entry for the item dated on or before the serve date
+   * is matched automatically; pass an id to be explicit.
+   */
+  readonly planEntryId?: string;
 }
 
 /**
@@ -653,7 +662,23 @@ export function serve(
   }
   // Cook-and-eat is one operation: if the cooking fails, the ingredients it
   // had already taken go back on the shelf, exactly as for `produce`.
-  return transactionally(db, () => serveInner(db, itemId, servings, options));
+  const result = transactionally(db, () => serveInner(db, itemId, servings, options));
+
+  // Only after the serve has actually happened: the plan entry it fulfils is
+  // history now, not demand — otherwise the next planning run would buy and
+  // cook a replacement for food already eaten. Deliberately outside the
+  // transaction boundary, so a failed serve leaves the plan intact.
+  const on = options.on ?? today();
+  const entry = options.planEntryId
+    ? db.mealPlan.find((candidate) => candidate.id === options.planEntryId && !candidate.servedOn)
+    : db.mealPlan
+        .filter((candidate) => candidate.itemId === itemId && !candidate.servedOn && candidate.date <= on)
+        .sort((a, b) => a.date.localeCompare(b.date))[0];
+  if (entry) {
+    entry.servedOn = on;
+    return { ...result, servedPlanEntryId: entry.id };
+  }
+  return result;
 }
 
 function serveInner(
@@ -744,7 +769,13 @@ export function executeOrder(db: Database, orderId: string, options: ProduceOpti
   // The same rule the purchase-order receipt applies: a cancelled order is a
   // decision already made, not a batch waiting to be cooked.
   if (order.status === 'cancelled') throw new MiseError(`Production order "${orderId}" was cancelled.`);
-  const result = produce(db, order.itemId, order.qty, { ...options, ref: orderId });
+  // The order carries the optional policy it was committed with; an explicit
+  // caller choice still wins.
+  const result = produce(db, order.itemId, order.qty, {
+    includeOptional: order.includeOptional === true,
+    ...options,
+    ref: orderId,
+  });
   order.status = 'received';
   return result;
 }
