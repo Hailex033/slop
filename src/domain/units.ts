@@ -221,5 +221,10 @@ export function parseQuantity(input: string): number {
   }
 
   if (!matched) throw new ConversionError(`Cannot parse quantity "${input}".`);
+  // Enough digits overflow Number to Infinity, which would book an infinite
+  // lot and then serialise to null in the store.
+  if (!Number.isFinite(total)) {
+    throw new ConversionError(`Quantity "${input}" is beyond counting.`);
+  }
   return total;
 }

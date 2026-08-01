@@ -19,6 +19,35 @@ import {
 import { nextId } from '../src/domain/ids.js';
 import { close, db, phantom, purchased } from './helpers.js';
 
+test('unfinished future output is not yet in the pantry', () => {
+  const database = db([purchased('flour')]);
+  receive(database, 'flour', { qty: 100, on: '2026-07-01', unitCost: 0.01 });
+  // A multi-day batch executed early books its output at completion.
+  receive(database, 'flour', { qty: 900, on: '2026-07-05', unitCost: 0.01 });
+
+  const line = stockReport(database, '2026-07-02').find((l) => l.item.id === 'flour')!;
+  assert.ok(close(line.qty, 100), `got ${line.qty}`);
+  assert.equal(line.lots, 1, 'the finishing batch is not on the shelf yet');
+  assert.ok(close(line.value, 1));
+  assert.ok(close(stockValue(database, '2026-07-02'), 1), 'nor is it wealth yet');
+
+  // Once the making completes, it counts.
+  assert.ok(close(stockReport(database, '2026-07-06').find((l) => l.item.id === 'flour')!.qty, 1000));
+  assert.ok(close(stockValue(database, '2026-07-06'), 10));
+});
+
+test('an issue of nonsense is refused before it touches the lots', () => {
+  const database = db([purchased('flour')]);
+  receive(database, 'flour', { qty: 100, on: '2026-07-01' });
+
+  // NaN would smear through every candidate lot and the cleanup sweep
+  // would then delete them all; a negative issue is a receipt in disguise.
+  assert.throws(() => issue(database, 'flour', { qty: Number.NaN, on: '2026-07-02' }), MiseError);
+  assert.throws(() => issue(database, 'flour', { qty: -5, on: '2026-07-02' }), MiseError);
+  assert.equal(database.lots.length, 1, 'the shelf is untouched');
+  assert.ok(close(database.lots[0]!.qty, 100));
+});
+
 test('a consumed lot keeps its id reserved in the ledger', () => {
   const database = db([purchased('flour')]);
   const first = receive(database, 'flour', { qty: 100, on: '2026-07-01' });

@@ -58,3 +58,10 @@ test('parses quantities off a recipe card', () => {
   assert.equal(parseQuantity('2½'), 2.5);
   assert.throws(() => parseQuantity('some'), ConversionError);
 });
+
+test('a quantity that overflows to infinity is refused', () => {
+  // Enough digits overflow Number to Infinity, which would book an
+  // infinite lot and then serialise to null in the store.
+  assert.throws(() => parseQuantity('9'.repeat(400)), ConversionError);
+  assert.throws(() => parseQuantity(`${'9'.repeat(400)}/3`), ConversionError);
+});

@@ -229,6 +229,12 @@ export function issue(db: Database, itemId: ItemId, options: IssueOptions): Issu
   const item = mustItem(db, itemId);
   const on = options.on ?? today();
   const want = convert(options.qty, options.uom ?? item.stockUom, item.stockUom, conversionContext(item));
+  // The mirror of receive's guard: NaN would smear through every candidate
+  // lot before the positive-quantity sweep deleted them all, and a negative
+  // "issue" is a receipt wearing the wrong sign.
+  if (!Number.isFinite(want) || want <= 0) {
+    throw new MiseError(`Cannot issue ${want} ${item.stockUom} of "${item.name}".`);
+  }
 
   // Cooking on a date can only use what is still good on that date.
   const plan = planAllocation(db, itemId, want, options.includeExpired ? undefined : on);
@@ -424,8 +430,12 @@ export function transactionally<T>(db: Database, work: () => T): T {
 }
 
 /** Value of everything in the pantry, at actual cost where known. */
-export function stockValue(db: Database): number {
-  return db.lots.reduce((sum, lot) => sum + lot.qty * (lot.unitCost ?? 0), 0);
+export function stockValue(db: Database, asOf: IsoDate = today()): number {
+  // A lot dated in the future is a batch still finishing — not yet wealth
+  // on the shelf, any more than it is food in the pantry.
+  return db.lots
+    .filter((lot) => lot.receivedOn <= asOf)
+    .reduce((sum, lot) => sum + lot.qty * (lot.unitCost ?? 0), 0);
 }
 
 export interface StockLine {
@@ -454,6 +464,10 @@ export function stockReport(db: Database, asOf: IsoDate = today()): StockLine[] 
 
   for (const lot of db.lots) {
     if (lot.qty <= 0) continue;
+    // A future receivedOn is a multi-day batch still finishing: availableOn
+    // already refuses to cook with it, and the pantry report must not claim
+    // it is physically on hand before the making completes.
+    if (lot.receivedOn > asOf) continue;
     const list = byItem.get(lot.itemId);
     if (list) list.push(lot);
     else byItem.set(lot.itemId, [lot]);
