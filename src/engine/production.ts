@@ -14,7 +14,7 @@ import { addDays, maxDate, today, type IsoDate } from '../domain/date.js';
 import { CycleError, MiseError, NotFoundError } from '../domain/errors.js';
 import { convert } from '../domain/units.js';
 import { nextId } from '../domain/ids.js';
-import type { Database, ItemId, MealPlanEntry, ProductionOrder } from '../domain/types.js';
+import type { Database, Item, ItemId, MealPlanEntry, ProductionOrder } from '../domain/types.js';
 import { quantityForServings, servingsForQuantity } from './explode.js';
 import { lowLevelCodes } from './graph.js';
 import { availableOn, isUsableOn, issue, receive, transactionally } from './inventory.js';
@@ -485,11 +485,12 @@ export interface ProduceOptions {
    */
   readonly planEntryId?: string;
   /**
-   * Settle open production orders for sub-recipes the cascade cooks inline.
-   * Only order execution sets this: the child orders were committed alongside
-   * the parent, so the inline make is that commitment being met. An ad-hoc
-   * cook leaves the order book alone — its output goes into today's dish,
-   * not into the future the standing orders were raised for.
+   * Settle open production orders the making meets, and round inline makes
+   * up to committed batch boundaries. Set by order execution and by a serve
+   * that fulfils planned demand — both are commitments being met. A cook or
+   * serve with no plan behind it leaves the order book alone: its output
+   * goes into today's dish, not into the future the standing orders were
+   * raised for.
    */
   readonly settleOrders?: boolean;
 }
@@ -609,18 +610,7 @@ function produceInner(
         // inputs that were planned, and bought, once. Round the cascade up
         // to the boundary of the last order it touches; the surplus is
         // banked for the siblings the merged run was planned to feed.
-        let boundary = 0;
-        for (const order of openOrdersFor(db, child.id)) {
-          if (boundary + 1e-9 >= gap) break;
-          // The merge behind a multi-meal order was proved from its planned
-          // start: made *then*, the batch keeps for every meal inside it.
-          // Made early, it may not — so an early execution of a perishable
-          // cooks only its own share and leaves the rest of the run
-          // standing, still committed to the meals the proof was anchored to.
-          if (child.shelfLifeDays !== undefined && on < order.startOn) break;
-          boundary += order.qty;
-        }
-        if (boundary > gap) gap = boundary;
+        gap = committedMakeQty(db, child, gap, on);
       }
       // The child books its own tub whatever frame asked for it: a phantom
       // parent consumes *its* output immediately, but a stocked child under
@@ -744,7 +734,14 @@ export function serve(
 
   // Cook-and-eat is one operation: if the cooking fails, the ingredients it
   // had already taken go back on the shelf, exactly as for `produce`.
-  const result = transactionally(db, () => serveInner(db, itemId, servings, options));
+  // A serve that fulfils plan entries is committed demand being met, so any
+  // cooking it triggers executes the committed batches — whole, with their
+  // orders settled — exactly as `receive PRD-x` would. A serve with no plan
+  // behind it stays ad-hoc and leaves the order book alone.
+  const fulfillingPlan = entries.length > 0;
+  const result = transactionally(db, () =>
+    serveInner(db, itemId, servings, { settleOrders: fulfillingPlan, ...options }),
+  );
 
   // Only after the serve has actually happened: what was eaten stops being
   // demand — otherwise the next planning run would buy and cook a
@@ -809,7 +806,18 @@ function serveInner(
       minutes: 0,
     };
   } else {
-    result = produceInner(db, itemId, qty - available, { ...options, on });
+    // The dish's own committed batch is the making unit here too: serving
+    // Friday's half of a merged two-dinner order cooks the whole batch —
+    // one making, one dose of its fixed inputs — and banks Sunday's half,
+    // then closes the order the making has met. Without this, serving each
+    // meal cooked the run again and consumed fixed ingredients the plan
+    // bought once.
+    let make = qty - available;
+    if (options.settleOrders === true) {
+      make = committedMakeQty(db, mustItem(db, itemId), make, on);
+    }
+    result = produceInner(db, itemId, make, { ...options, on });
+    if (options.settleOrders === true) settleCommittedOrders(db, itemId, make);
   }
 
   // The cost of a meal is the cost of the lots it came out of, whether those
@@ -826,9 +834,27 @@ function openOrdersFor(db: Database, itemId: ItemId): ProductionOrder[] {
 }
 
 /**
- * Apply quantity cooked by an order execution's cascade against the open
- * orders it fulfilled. Only `executeOrder` reaches here — the cascade of an
- * ad-hoc cook fulfils nothing on the order book.
+ * Round an inline making up to the boundary of the open committed orders it
+ * touches: the committed run is the making unit, with one dose of every
+ * `scalable: false` input, however many meals share it. Perishable orders
+ * whose planned start is later than the cook date are left standing — the
+ * shelf-life proof behind a merge is anchored at its planned start, and a
+ * batch made early may not keep for the meals the proof promised.
+ */
+function committedMakeQty(db: Database, item: Item, gap: number, on: IsoDate): number {
+  let boundary = 0;
+  for (const order of openOrdersFor(db, item.id)) {
+    if (boundary + 1e-9 >= gap) break;
+    if (item.shelfLifeDays !== undefined && on < order.startOn) break;
+    boundary += order.qty;
+  }
+  return boundary > gap ? boundary : gap;
+}
+
+/**
+ * Apply quantity cooked against the open orders it fulfilled. Only order
+ * execution and a serve fulfilling planned demand reach here — the cascade
+ * of an ad-hoc cook fulfils nothing on the order book.
  *
  * Orders are settled earliest-due-first, whatever their scheduled start: a
  * parent executed ahead of plan cooks its child ahead of plan too, and the

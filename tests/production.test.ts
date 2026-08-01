@@ -824,6 +824,44 @@ test('an early execution does not bank perishable surplus past its keeping', () 
   assert.equal(sauceOrder.status, 'received');
 });
 
+test('serving planned meals one by one still cooks the committed batch once', () => {
+  const database = nestedDb();
+  // One sachet per making of the dish, however many dinners share the batch.
+  database.items.push(purchased('sachet2', { stockUom: 'ea' }));
+  database.recipes = database.recipes.map((r) =>
+    r.outputItemId === 'dish'
+      ? { ...r, components: [...r.components, { itemId: 'sachet2', qty: 1, uom: 'ea', scalable: false }] }
+      : r,
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 2 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-05', slot: 'dinner', itemId: 'dish', servings: 2 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+  // Exactly what the merged plan shopped for: one making's sachet.
+  receive(database, 'sachet2', { qty: 1, on: '2026-06-30' });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(!mrp.purchases.some((p) => p.itemId === 'sachet2'), 'one merged making, one sachet planned');
+  commitProduction(database, mrp);
+  const dishOrder = database.productionOrders.find((o) => o.itemId === 'dish')!;
+
+  // Serving Friday's dinner is the committed demand happening: it cooks the
+  // batch the order stands for — whole — banks Sunday's half, and closes
+  // the order. Cooking just Friday's share would make the batch again on
+  // Sunday and consume a second sachet nobody planned to buy.
+  const first = serve(database, 'dish', 2, { on: '2026-07-03' });
+  assert.equal(first.servedPlanEntryId, 'MP-1');
+  assert.equal(dishOrder.status, 'received', 'the making it stood for has happened');
+  assert.ok(close(onHand(database, 'dish'), 750), `got ${onHand(database, 'dish')}`);
+
+  // Sunday opens the fridge: no second making, no second sachet.
+  const second = serve(database, 'dish', 2, { on: '2026-07-05' });
+  assert.equal(second.shortages.length, 0, 'no unplanned shortage');
+  assert.ok(close(onHand(database, 'dish'), 0), 'the banked half is eaten');
+  assert.ok(close(onHand(database, 'sachet2'), 0), 'one making, one sachet');
+});
+
 test('a stocked sub-recipe under a phantom is banked and issued, not lost', () => {
   const database = db(
     [purchased('chili'), made('paste'), phantom('blend'), made('dish')],
