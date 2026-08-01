@@ -153,6 +153,15 @@ test('impossible served counts and orphaned orders are integrity problems', () =
   assert.ok(issues.some((i) => i.includes('Production order "PRD-1" references unknown item')));
 });
 
+test('zero servings on the plan is an integrity problem', () => {
+  // `plan add` refuses this too; a hand-edited file is doctor's job.
+  const database = db([purchased('flour')]);
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'flour', servings: 0 });
+
+  const issues = validate(database);
+  assert.ok(issues.some((issue) => issue.includes('non-positive servings')), JSON.stringify(issues));
+});
+
 test('a phantom on the meal plan is an integrity problem', () => {
   const database = nestedDb();
   // `plan add` refuses this; a hand-edited file can still contain it, and

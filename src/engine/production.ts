@@ -583,8 +583,29 @@ function produceInner(
     let madeToOrder = false;
     const available = availableOn(db, child.id, on);
     if (available + 1e-9 < need && isMade(child) && cascade) {
-      const gap = need - available;
-      const inner = produceInner(db, child.id, gap, { ...options, on, ref }, nextPath);
+      let gap = need - available;
+      if (options.settleOrders === true) {
+        // A committed order is the making MRP planned: one run, one dose of
+        // every `scalable: false` input, however many meals share it.
+        // Cooking only this parent's share would leave the rest of the run
+        // to be cooked again for the next parent — a second dose of fixed
+        // inputs that were planned, and bought, once. Round the cascade up
+        // to the boundary of the last order it touches; the surplus is
+        // banked for the siblings the merged run was planned to feed, and
+        // the run's own planning proved it keeps until they need it.
+        let boundary = 0;
+        for (const order of openOrdersFor(db, child.id)) {
+          if (boundary + 1e-9 >= gap) break;
+          boundary += order.qty;
+        }
+        if (boundary > gap) gap = boundary;
+      }
+      // The child books its own tub whatever frame asked for it: a phantom
+      // parent consumes *its* output immediately, but a stocked child under
+      // one is still issued from stock below, so its output must land there
+      // first — inheriting the flag would strand the fresh batch nowhere
+      // and fail that issue against an empty shelf.
+      const inner = produceInner(db, child.id, gap, { ...options, on, ref, consumeImmediately: false }, nextPath);
       cascadedMinutes += inner.minutes;
       shortages.push(...inner.shortages);
       madeToOrder = true;
@@ -775,6 +796,13 @@ function serveInner(
   return { ...result, qty, servings, cost: eaten.cost };
 }
 
+/** Open production orders for an item, earliest-due-first — settlement order. */
+function openOrdersFor(db: Database, itemId: ItemId): ProductionOrder[] {
+  return db.productionOrders
+    .filter((order) => order.status === 'open' && order.itemId === itemId)
+    .sort((a, b) => a.dueOn.localeCompare(b.dueOn));
+}
+
 /**
  * Apply quantity cooked by an order execution's cascade against the open
  * orders it fulfilled. Only `executeOrder` reaches here — the cascade of an
@@ -784,18 +812,16 @@ function serveInner(
  * parent executed ahead of plan cooks its child ahead of plan too, and the
  * child's not-yet-opened order is exactly the commitment that work met.
  * (Freshness is no objection here — the cascaded output went straight into
- * the parent, not onto a shelf to age.) For the same reason, an order only
- * partially covered is *reduced*, not left standing: there is no lot for a
- * later planning run to reconcile, so the remainder is the only part of the
- * commitment still real.
+ * the parent, not onto a shelf to age.) An order the cooked quantity only
+ * partially covers — reachable only for off-plan quantities, since a
+ * committed cascade rounds itself up to order boundaries — is *reduced*,
+ * not left standing: there is no lot for a later planning run to
+ * reconcile, so the remainder is the only part of the commitment still
+ * real.
  */
 function settleCommittedOrders(db: Database, itemId: ItemId, cooked: number): void {
   let remaining = cooked;
-  const open = db.productionOrders
-    .filter((order) => order.status === 'open' && order.itemId === itemId)
-    .sort((a, b) => a.dueOn.localeCompare(b.dueOn));
-
-  for (const order of open) {
+  for (const order of openOrdersFor(db, itemId)) {
     if (remaining <= 1e-9) break;
     if (remaining + 1e-9 >= order.qty) {
       remaining -= order.qty;

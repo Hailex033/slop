@@ -648,7 +648,7 @@ test('a failed cook puts settled child orders back', () => {
   assert.equal(onHand(database, 'butter'), 500, 'and so did the butter');
 });
 
-test('a cascade covering part of a child order reduces it; the rest settles later', () => {
+test('a merged child order is cooked whole on first use and banked for the rest', () => {
   const database = nestedDb();
   // A one-day shelf life keeps the two dishes as separate runs, while the
   // sauce — which keeps — merges into a single committed order serving both.
@@ -669,16 +669,76 @@ test('a cascade covering part of a child order reduces it; the rest settles late
   assert.equal(dishOrders.length, 2);
   assert.ok(close(sauceOrder.qty, 2000), 'one merged commitment for both meals');
 
-  // First dinner cascades 1000 g of sauce — half the commitment. That half
-  // went straight into the dish, so no lot remains to reconcile: the order
-  // itself must shrink.
+  // The first dinner meets the merged commitment in full: the run is one
+  // making, so it is cooked once, and the second dinner's half goes on the
+  // shelf — which the run's own planning proved it keeps long enough for.
   executeOrder(database, dishOrders[0]!.id, { on: '2026-07-03' });
-  assert.equal(sauceOrder.status, 'open', 'half a commitment is still a commitment');
-  assert.ok(close(sauceOrder.qty, 1000), `got ${sauceOrder.qty}`);
+  assert.equal(sauceOrder.status, 'received', 'one committed making, made once');
+  assert.ok(close(onHand(database, 'sauce'), 1000), `got ${onHand(database, 'sauce')}`);
 
-  // The second dinner cooks the remainder and closes it.
-  executeOrder(database, dishOrders[1]!.id, { on: '2026-07-06' });
-  assert.equal(sauceOrder.status, 'received');
+  // The second dinner draws the banked half instead of cooking again.
+  const second = executeOrder(database, dishOrders[1]!.id, { on: '2026-07-06' });
+  assert.ok(close(onHand(database, 'sauce'), 0), 'drawn, not re-made');
+  const sauceLine = second.consumed.find((line) => line.itemId === 'sauce')!;
+  assert.equal(sauceLine.madeToOrder, false, 'the second dinner just opens the fridge');
+});
+
+test('a merged run consumes its fixed inputs once, however many meals share it', () => {
+  const database = nestedDb();
+  // One sachet per making of sauce, however large the batch.
+  database.items.push(purchased('sachet', { stockUom: 'ea' }));
+  database.recipes = database.recipes.map((r) =>
+    r.outputItemId === 'sauce'
+      ? { ...r, components: [...r.components, { itemId: 'sachet', qty: 1, uom: 'ea', scalable: false }] }
+      : r,
+  );
+  database.items = database.items.map((item) =>
+    item.id === 'dish' ? { ...item, shelfLifeDays: 1 } : item,
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-06', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+  // Exactly what the plan calls for: one making's sachet, not two.
+  receive(database, 'sachet', { qty: 1, on: '2026-06-30' });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(!mrp.purchases.some((p) => p.itemId === 'sachet'), 'planning wants no second sachet');
+  commitProduction(database, mrp);
+  const dishOrders = database.productionOrders
+    .filter((o) => o.itemId === 'dish')
+    .sort((a, b) => a.dueOn.localeCompare(b.dueOn));
+
+  // Splitting the merged sauce run across the dinners would cook it twice —
+  // and the second making would fail short one sachet nobody planned to buy.
+  executeOrder(database, dishOrders[0]!.id, { on: '2026-07-03' });
+  const second = executeOrder(database, dishOrders[1]!.id, { on: '2026-07-06' });
+  assert.equal(second.shortages.length, 0, 'no unplanned shortage');
+  assert.ok(close(onHand(database, 'sachet'), 0), 'one making, one sachet');
+});
+
+test('a stocked sub-recipe under a phantom is banked and issued, not lost', () => {
+  const database = db(
+    [purchased('chili'), made('paste'), phantom('blend'), made('dish')],
+    [
+      recipe('paste', 100, [{ itemId: 'chili', qty: 100, uom: 'g' }]),
+      recipe('blend', 100, [{ itemId: 'paste', qty: 100, uom: 'g' }]),
+      recipe('dish', 1000, [{ itemId: 'blend', qty: 100, uom: 'g' }]),
+    ],
+  );
+  receive(database, 'chili', { qty: 500, on: '2026-07-01' });
+
+  // The phantom's own output is consumed where it stands — but the stocked
+  // paste under it must still be booked in before it is issued back out.
+  // Inheriting the phantom's consume-immediately flag stranded it nowhere,
+  // and the cook failed claiming a shortage of the paste it had just made.
+  const result = produce(database, 'dish', 1000, { on: '2026-07-02' });
+
+  assert.equal(result.shortages.length, 0, 'nothing was short');
+  assert.ok(close(onHand(database, 'chili'), 400), 'the paste took its chili');
+  assert.ok(close(onHand(database, 'paste'), 0), 'made, issued into the phantom, nothing stranded');
+  assert.ok(close(onHand(database, 'dish'), 1000), 'and the dish landed in stock');
 });
 
 test('an ad-hoc cook leaves committed orders for other meals standing', () => {
