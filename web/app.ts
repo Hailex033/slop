@@ -9,7 +9,7 @@
 
 import { seedDatabase } from '../src/data/seed.js';
 import { formatDate, today, type IsoDate } from '../src/domain/date.js';
-import { householdServings, mustItem, normalizeDb, recipeFor } from '../src/domain/db.js';
+import { householdServings, mustItem, normalizeDb, recipeFor, remainingServings } from '../src/domain/db.js';
 import { MiseError } from '../src/domain/errors.js';
 import type { Database, Item, ItemId } from '../src/domain/types.js';
 import type { UomCode } from '../src/domain/units.js';
@@ -416,15 +416,17 @@ function viewPantry(): HTMLElement[] {
 function viewPlan(): HTMLElement[] {
   const db = state.db;
   const from = today();
-  const entries = [...db.mealPlan].sort((a, b) => a.date.localeCompare(b.date) || a.slot.localeCompare(b.slot));
+  const entries = [...db.mealPlan]
+    .filter((e) => remainingServings(e) > 1e-9)
+    .sort((a, b) => a.date.localeCompare(b.date) || a.slot.localeCompare(b.slot));
 
   const costOfEntry = (itemId: ItemId, servings: number): number => {
     const target = quantityForServings(db, itemId, servings);
     return costOf(db, itemId, target.qty, target.uom).total;
   };
 
-  const total = entries.filter((e) => e.date >= from).reduce((sum, e) => sum + costOfEntry(e.itemId, e.servings), 0);
-  const servingsPlanned = entries.filter((e) => e.date >= from).reduce((sum, e) => sum + e.servings, 0);
+  const total = entries.filter((e) => e.date >= from).reduce((sum, e) => sum + costOfEntry(e.itemId, remainingServings(e)), 0);
+  const servingsPlanned = entries.filter((e) => e.date >= from).reduce((sum, e) => sum + remainingServings(e), 0);
 
   return [
     el('h1', {}, 'Meal plan'),
@@ -447,13 +449,13 @@ function viewPlan(): HTMLElement[] {
             onclick: (event: Event) => {
               event.preventDefault();
               state.itemId = e.itemId;
-              state.servings = e.servings;
+              state.servings = remainingServings(e);
               state.view = 'recipes';
               render();
             },
           }, mustItem(db, e.itemId).name) },
-        { head: 'Servings', cell: (e) => num(e.servings), num: true },
-        { head: 'Cost', cell: (e) => cash(costOfEntry(e.itemId, e.servings)), num: true },
+        { head: 'Servings', cell: (e) => num(remainingServings(e)), num: true },
+        { head: 'Cost', cell: (e) => cash(costOfEntry(e.itemId, remainingServings(e))), num: true },
         { head: '', cell: (e) => el('span', { class: 'dim' }, e.note ?? '') },
       ], 'No meals planned.')),
   ];

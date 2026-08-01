@@ -385,6 +385,15 @@ test('order quantities and dates are integrity-checked too', () => {
     id: 'PO-2', supplierId: 'shop', orderedOn: '2026-07-05', expectedOn: '2026-07-03', status: 'open',
     lines: [{ itemId: 'flour', packs: 1, unitPrice: 1 }],
   });
+  // A typo'd status is invisible to every selector: MRP and prep read only
+  // 'open', so the commitment stops netting and gets planned again.
+  database.productionOrders.push({
+    id: 'PRD-4', itemId: 'flour', qty: 100, dueOn: '2026-07-03', startOn: '2026-07-03', status: 'opne' as never,
+  });
+  database.purchaseOrders.push({
+    id: 'PO-4', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'onorder' as never,
+    lines: [{ itemId: 'flour', packs: 1, unitPrice: 1 }],
+  });
 
   const issues = validate(database);
   assert.ok(issues.some((i) => i.includes('invalid qty (0)')), JSON.stringify(issues));
@@ -393,6 +402,8 @@ test('order quantities and dates are integrity-checked too', () => {
   assert.ok(issues.some((i) => i.includes('starts on 2026-07-05, after it is due')));
   assert.ok(issues.some((i) => i.includes('expected on 2026-07-03, before it was ordered')));
   assert.ok(issues.some((i) => i.includes('Purchase order "PO-3" has no lines')));
+  assert.ok(issues.some((i) => i.includes('Production order "PRD-4" has unknown status "opne"')));
+  assert.ok(issues.some((i) => i.includes('Purchase order "PO-4" has unknown status "onorder"')));
   // And all three orders target purchased flour — unmakeable commitments.
   assert.ok(issues.some((i) => i.includes('only manufactured items are made')));
 });

@@ -3,7 +3,7 @@
 import { NotFoundError, ValidationError } from './errors.js';
 import { canConvert, dimensionOf, isUomCode, type ConversionContext, type UomCode } from './units.js';
 import { isIsoDate } from './date.js';
-import { MEAL_SLOTS } from './types.js';
+import { MEAL_SLOTS, ORDER_STATUSES } from './types.js';
 import type {
   Database,
   Item,
@@ -563,6 +563,12 @@ export function validate(db: Database): string[] {
     if (order.status === 'open' && order.lines.length === 0) {
       issues.push(`Purchase order "${order.id}" has no lines.`);
     }
+    // A mistyped status is invisible to MRP and prep — which select only
+    // "open" and would plan duplicate supply — yet the receipt still
+    // accepts it, since it rejects only received and cancelled.
+    if (!(ORDER_STATUSES as readonly string[]).includes(order.status)) {
+      issues.push(`Purchase order "${order.id}" has unknown status "${order.status}".`);
+    }
     for (const line of order.lines) {
       if (!findItem(db, line.itemId)) {
         issues.push(`Purchase order "${order.id}" has a line for unknown item "${line.itemId}".`);
@@ -629,6 +635,9 @@ export function validate(db: Database): string[] {
       issues.push(
         `Production order "${order.id}" starts on ${order.startOn}, after it is due (${order.dueOn}).`,
       );
+    }
+    if (!(ORDER_STATUSES as readonly string[]).includes(order.status)) {
+      issues.push(`Production order "${order.id}" has unknown status "${order.status}".`);
     }
   }
   // History references items too. The ledger is read-only, so a hole here

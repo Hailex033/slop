@@ -217,7 +217,8 @@ export interface MealPlanEntry {
   readonly note?: string;
 }
 
-export type OrderStatus = 'planned' | 'open' | 'received' | 'cancelled';
+export const ORDER_STATUSES = ['planned', 'open', 'received', 'cancelled'] as const;
+export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
 export interface PurchaseOrderLine {
   readonly itemId: ItemId;
