@@ -11,7 +11,7 @@
  * peel is bought and paid for, but it is not eaten.
  */
 
-import { conversionContext, findItem, isMade, mustItem, recipeFor } from '../domain/db.js';
+import { conversionContext, findItem, isMade, isStocked, mustItem, recipeFor } from '../domain/db.js';
 import { MiseError } from '../domain/errors.js';
 import { convert, type UomCode } from '../domain/units.js';
 import type { Database, Item, ItemId, Nutrients, Recipe } from '../domain/types.js';
@@ -548,6 +548,48 @@ export function recipeMinutes(recipe: Recipe): { active: number; passive: number
     passive += step.passiveMin ?? 0;
   }
   return { active, passive };
+}
+
+/**
+ * Run time including the phantoms made inline along the way.
+ *
+ * A phantom is never a scheduled run of its own — it is made in the moment,
+ * inside its parent's cooking — so its kneading and resting belong to the
+ * parent's clock. Without this, planning scheduled pasta sheets as a
+ * 25-minute job while the dough's knead-and-rest went nowhere, and a pizza
+ * dough was slotted the same day its overnight poolish still had to happen.
+ * Stocked children are deliberately excluded: they are their own runs.
+ */
+export function runMinutesWithPhantoms(
+  db: Database,
+  item: Item,
+  recipe: Recipe,
+  batches: number,
+  seen: ReadonlySet<ItemId> = new Set(),
+): { active: number; passive: number; total: number } {
+  const own = runMinutes(recipe, batches);
+  let active = own.active;
+  let passive = own.passive;
+
+  for (const component of recipe.components) {
+    if (component.optional) continue;
+    const child = findItem(db, component.itemId);
+    if (!child || isStocked(child) || seen.has(child.id)) continue;
+    const childRecipe = recipeFor(db, child.id);
+    if (!childRecipe) continue;
+
+    const scaled = component.scalable === false ? component.qty : component.qty * batches;
+    const need = convert(scaled, component.uom, child.stockUom, conversionContext(child));
+    const grossed = component.lossPct ? need / (1 - component.lossPct) : need;
+    const batchQty = convert(childRecipe.yieldQty, childRecipe.yieldUom, child.stockUom, conversionContext(child));
+    const childBatches = batchQty === 0 ? 0 : grossed / batchQty;
+
+    const inner = runMinutesWithPhantoms(db, child, childRecipe, childBatches, new Set(seen).add(item.id));
+    active += inner.active;
+    passive += inner.passive;
+  }
+
+  return { active, passive, total: active + passive };
 }
 
 export interface TimeRollup {

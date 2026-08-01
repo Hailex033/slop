@@ -32,7 +32,7 @@ import type { Database, Item, ItemId, MealPlanEntry, ProductionOrder } from '../
 import { quantityForServings } from './explode.js';
 import { lowLevelCodes } from './graph.js';
 import { availableOn } from './inventory.js';
-import { runMinutes } from './rollup.js';
+import { runMinutesWithPhantoms } from './rollup.js';
 
 /** Hours in a day you can realistically be cooking. Used for backward scheduling. */
 const COOKING_MINUTES_PER_DAY = 8 * 60;
@@ -300,9 +300,17 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       }
       const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
       for (const run of runs) {
-        // Timing is per *run*, not per batch — see `runMinutes`.
+        // Timing is per *run*, not per batch — see `runMinutes` — and it
+        // includes the phantoms this run will make inline: the dough is
+        // kneaded and rested on the sheets' clock, since it has no run of
+        // its own.
         const batches = batchQty === 0 ? 0 : run.qty / batchQty;
-        const { active: activeMin, passive: passiveMin, total: minutes } = runMinutes(recipe, batches);
+        const { active: activeMin, passive: passiveMin, total: minutes } = runMinutesWithPhantoms(
+          db,
+          item,
+          recipe,
+          batches,
+        );
 
         // Backward-schedule against a usable cooking day. A four-hour braise
         // still finishes the same day; an overnight prove does not.

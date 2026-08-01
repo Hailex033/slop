@@ -19,7 +19,7 @@ import { quantityForServings, servingsForQuantity } from './explode.js';
 import { lowLevelCodes } from './graph.js';
 import { availableOn, isUsableOn, issue, receive, transactionally } from './inventory.js';
 import type { MrpResult, PlannedProduction } from './mrp.js';
-import { runMinutes } from './rollup.js';
+import { runMinutes, runMinutesWithPhantoms } from './rollup.js';
 
 // ---------------------------------------------------------------------------
 // Scheduling
@@ -93,6 +93,27 @@ export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+/**
+ * The steps for a run, with the phantoms it makes inline folded in first:
+ * the dough is kneaded before the sheets are rolled, and a schedule that
+ * hides the kneading starts the evening late. Stocked sub-recipes are their
+ * own tasks and keep their own steps.
+ */
+function stepsWithPhantoms(db: Database, itemId: ItemId, seen: ReadonlySet<ItemId> = new Set()): string[] {
+  const recipe = recipeFor(db, itemId);
+  if (!recipe) return [];
+  const steps: string[] = [];
+  for (const component of recipe.components) {
+    if (component.optional) continue;
+    const child = findItem(db, component.itemId);
+    if (!child || isStocked(child) || seen.has(child.id)) continue;
+    const inner = stepsWithPhantoms(db, child.id, new Set(seen).add(itemId));
+    steps.push(...inner.map((text) => `${child.name}: ${text}`));
+  }
+  steps.push(...(recipe.steps ?? []).map((step) => step.text));
+  return steps;
+}
+
 /** A prep task reconstructed from a firm order rather than a fresh plan. */
 function firmPrepTask(db: Database, order: ProductionOrder, level: number, earliest: IsoDate): PrepTask {
   const item = mustItem(db, order.itemId);
@@ -101,9 +122,12 @@ function firmPrepTask(db: Database, order: ProductionOrder, level: number, earli
     ? convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item))
     : 0;
   const batches = recipe && batchQty > 0 ? order.qty / batchQty : 0;
-  // Same batch policy as planning used when the order was cut: hands-on
-  // scales with batches, unattended does not.
-  const minutes = recipe ? runMinutes(recipe, batches) : { active: 0, passive: 0, total: 0 };
+  // Same timing policy as planning used when the order was cut: hands-on
+  // scales with batches, unattended does not, and the phantoms this run
+  // makes inline are on its clock.
+  const minutes = recipe
+    ? runMinutesWithPhantoms(db, item, recipe, batches)
+    : { active: 0, passive: 0, total: 0 };
 
   return {
     itemId: order.itemId,
@@ -116,12 +140,11 @@ function firmPrepTask(db: Database, order: ProductionOrder, level: number, earli
     activeMin: minutes.active,
     passiveMin: minutes.passive,
     level,
-    steps: (recipe?.steps ?? []).map((step) => step.text),
+    steps: stepsWithPhantoms(db, order.itemId),
   };
 }
 
 function toPrepTask(db: Database, planned: PlannedProduction): PrepTask {
-  const recipe = recipeFor(db, planned.itemId);
   return {
     itemId: planned.itemId,
     name: planned.name,
@@ -136,7 +159,7 @@ function toPrepTask(db: Database, planned: PlannedProduction): PrepTask {
     activeMin: planned.activeMin,
     passiveMin: planned.passiveMin,
     level: planned.level,
-    steps: (recipe?.steps ?? []).map((step) => step.text),
+    steps: stepsWithPhantoms(db, planned.itemId),
   };
 }
 

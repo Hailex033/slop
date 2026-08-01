@@ -6,7 +6,7 @@ import { commitProduction, runMrp } from '../src/engine/mrp.js';
 import { bySupplier, packsFor, raisePurchaseOrders, receivePurchaseOrder, shoppingList } from '../src/engine/procurement.js';
 import { cookableNow, executeOrder, feasibility, prepSchedule, produce, raiseProductionOrder, serve } from '../src/engine/production.js';
 import { CycleError, MiseError, ShortageError } from '../src/domain/errors.js';
-import { close, db, made, nestedDb, purchased, recipe } from './helpers.js';
+import { close, db, made, nestedDb, phantom, purchased, recipe } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Procurement
@@ -512,6 +512,34 @@ test('committed batches stay on the prep schedule', () => {
   assert.ok(position('sauce') < position('dish'), 'deepest-first still holds');
   const dish = tasks[position('dish')]!;
   assert.ok(close(dish.qty, 1500), `got ${dish.qty}`);
+});
+
+test('a prep task lists the phantom steps it implies, in making order', () => {
+  const database = db(
+    [purchased('flour'), phantom('dough'), made('sheets')],
+    [
+      recipe('dough', 500, [{ itemId: 'flour', qty: 300, uom: 'g' }], {
+        steps: [
+          { text: 'knead', activeMin: 10 },
+          { text: 'rest', passiveMin: 30 },
+        ],
+      }),
+      recipe('sheets', 500, [{ itemId: 'dough', qty: 500, uom: 'g' }], {
+        steps: [{ text: 'roll', activeMin: 25 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'sheets', servings: 1 });
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const task = prepSchedule(database, result)
+    .flatMap((day) => day.tasks)
+    .find((t) => t.itemId === 'sheets')!;
+
+  // The dough is made first, on this task's clock — its steps lead.
+  assert.deepEqual(task.steps, ['dough: knead', 'dough: rest', 'roll']);
+  assert.equal(task.activeMin, 35);
+  assert.equal(task.passiveMin, 30);
 });
 
 test('an overdue open order lands on today, not off the schedule', () => {

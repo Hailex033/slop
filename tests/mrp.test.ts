@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
 import { receive } from '../src/engine/inventory.js';
 import { commitProduction, runMrp } from '../src/engine/mrp.js';
-import { close, db, made, nestedDb, purchased, recipe } from './helpers.js';
+import { close, db, made, nestedDb, phantom, purchased, recipe } from './helpers.js';
 
 function planned(database: ReturnType<typeof nestedDb>, itemId: string, servings: number, date: string) {
   database.mealPlan.push({ id: `MP-${database.mealPlan.length + 1}`, date, slot: 'dinner', itemId, servings });
@@ -606,6 +606,59 @@ test('ignoring stock does not ignore commitments already made', () => {
   // 200 kg of roux, of which half is butter.
   const butter = rerun.purchases.find((line) => line.itemId === 'butter')!;
   assert.ok(close(butter.qty, 100_000), `got ${butter.qty}`);
+});
+
+test("a phantom's work is folded into the run that consumes it", () => {
+  const database = db(
+    [purchased('flour'), phantom('dough'), made('sheets')],
+    [
+      recipe('dough', 500, [{ itemId: 'flour', qty: 300, uom: 'g' }], {
+        steps: [
+          { text: 'knead', activeMin: 10 },
+          { text: 'rest', passiveMin: 30 },
+        ],
+      }),
+      recipe('sheets', 500, [{ itemId: 'dough', qty: 500, uom: 'g' }], {
+        steps: [{ text: 'roll', activeMin: 25 }],
+      }),
+    ],
+  );
+  planned(database, 'sheets', 1, '2026-07-03');
+
+  const run = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }).production.find(
+    (order) => order.itemId === 'sheets',
+  )!;
+
+  // The dough has no run of its own — its kneading and resting happen on
+  // the sheets' clock, or they happen nowhere.
+  assert.equal(run.activeMin, 35);
+  assert.equal(run.passiveMin, 30);
+  assert.equal(run.minutes, 65);
+});
+
+test('an overnight phantom pushes the start of its consumer back', () => {
+  const database = db(
+    [purchased('flour'), purchased('yeast'), phantom('poolish'), made('bread')],
+    [
+      recipe('poolish', 400, [
+        { itemId: 'flour', qty: 200, uom: 'g' },
+        { itemId: 'yeast', qty: 1, uom: 'g' },
+      ], { steps: [{ text: 'ferment overnight', activeMin: 3, passiveMin: 1440 }] }),
+      recipe('bread', 800, [
+        { itemId: 'poolish', qty: 400, uom: 'g' },
+        { itemId: 'flour', qty: 400, uom: 'g' },
+      ], { steps: [{ text: 'mix and bake', activeMin: 30 }] }),
+    ],
+  );
+  planned(database, 'bread', 1, '2026-07-05');
+
+  const run = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }).production.find(
+    (order) => order.itemId === 'bread',
+  )!;
+
+  // 1473 minutes of work is a multi-day job however you slice an 8-hour day.
+  assert.equal(run.minutes, 1473);
+  assert.equal(run.startOn, '2026-07-02', 'the poolish night is on the schedule');
 });
 
 test('a committed order straddling the horizon still buys its components', () => {
