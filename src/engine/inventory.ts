@@ -230,6 +230,23 @@ export function issue(db: Database, itemId: ItemId, options: IssueOptions): Issu
   }
   db.lots = db.lots.filter((lot) => lot.qty > 1e-9);
 
+  // A forced issue consumed more than the lots can explain. The overrun is
+  // still consumption — the dish was cooked, the meal served — and a ledger
+  // that omits it cannot reconcile with the production it goes on to record.
+  // No lot and no cost to attach: just the honest quantity.
+  if (plan.shortfall > 1e-9) {
+    txns.push(
+      post(db, {
+        at: on,
+        type: options.type ?? 'issue',
+        itemId,
+        qty: -plan.shortfall,
+        ...(options.ref ? { ref: options.ref } : {}),
+        note: options.note ? `${options.note}; forced beyond stock` : 'forced beyond stock',
+      }),
+    );
+  }
+
   return {
     issued: want - plan.shortfall,
     shortfall: plan.shortfall,

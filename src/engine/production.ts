@@ -10,7 +10,7 @@
  */
 
 import { conversionContext, findItem, isMade, isStocked, mustItem, recipeFor } from '../domain/db.js';
-import { addDays, today, type IsoDate } from '../domain/date.js';
+import { addDays, maxDate, today, type IsoDate } from '../domain/date.js';
 import { CycleError, MiseError, NotFoundError } from '../domain/errors.js';
 import { convert } from '../domain/units.js';
 import { nextId } from '../domain/ids.js';
@@ -68,13 +68,16 @@ export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
   // appear in `mrp.production` — but somebody still has to cook them.
   // Without this, `mrp --commit` followed by `prep` says "nothing to cook"
   // while the order book is full. Every open order whose cooking falls
-  // inside the window joins the schedule alongside the newly planned work.
+  // inside the window joins the schedule alongside the newly planned work —
+  // including overdue ones: an order past its due date and still open is
+  // late, not gone, and MRP is counting its output as supply. It cannot be
+  // cooked in the past, so it lands on today's list.
   const horizonEnd = addDays(mrp.asOf, mrp.horizonDays - 1);
   const codes = lowLevelCodes(db);
   for (const order of db.productionOrders) {
     if (order.status !== 'open') continue;
-    if (order.startOn > horizonEnd || order.dueOn < mrp.asOf) continue;
-    add(firmPrepTask(db, order, codes.get(order.itemId) ?? 0));
+    if (order.startOn > horizonEnd) continue;
+    add(firmPrepTask(db, order, codes.get(order.itemId) ?? 0, mrp.asOf));
   }
 
   return [...byDate.entries()]
@@ -91,7 +94,7 @@ export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
 }
 
 /** A prep task reconstructed from a firm order rather than a fresh plan. */
-function firmPrepTask(db: Database, order: ProductionOrder, level: number): PrepTask {
+function firmPrepTask(db: Database, order: ProductionOrder, level: number, earliest: IsoDate): PrepTask {
   const item = mustItem(db, order.itemId);
   const recipe = recipeFor(db, order.itemId);
   const batchQty = recipe
@@ -108,7 +111,7 @@ function firmPrepTask(db: Database, order: ProductionOrder, level: number): Prep
     qty: order.qty,
     uom: item.stockUom,
     servings: recipe ? batches * recipe.servings : 0,
-    on: order.startOn,
+    on: maxDate(earliest, order.startOn),
     dueOn: order.dueOn,
     activeMin: minutes.active,
     passiveMin: minutes.passive,
@@ -527,7 +530,7 @@ function produceInner(
       // that stood for it. Left open, that order would be cooked again —
       // duplicate stock — while MRP and prep kept counting a commitment
       // that has already been met.
-      settleCommittedOrders(db, child.id, gap, on);
+      settleCommittedOrders(db, child.id, gap);
     }
 
     // `consumeImmediately` decides whether the *output* gets booked into stock.
@@ -647,17 +650,19 @@ function serveInner(
 /**
  * Apply quantity cooked by a cascade against the open orders it fulfilled.
  *
- * Orders are settled earliest-due-first, and only those whose cooking window
- * has already opened (`startOn <= on`) — those are the ones somebody would
- * otherwise execute today and cook twice. An order only partially covered is
- * *reduced*, not left standing: the cascaded output went straight into the
- * parent, so there is no lot for a later planning run to reconcile — the
- * remainder is the only part of the commitment still real.
+ * Orders are settled earliest-due-first, whatever their scheduled start: a
+ * parent executed ahead of plan cooks its child ahead of plan too, and the
+ * child's not-yet-opened order is exactly the commitment that work met.
+ * (Freshness is no objection here — the cascaded output went straight into
+ * the parent, not onto a shelf to age.) For the same reason, an order only
+ * partially covered is *reduced*, not left standing: there is no lot for a
+ * later planning run to reconcile, so the remainder is the only part of the
+ * commitment still real.
  */
-function settleCommittedOrders(db: Database, itemId: ItemId, cooked: number, on: IsoDate): void {
+function settleCommittedOrders(db: Database, itemId: ItemId, cooked: number): void {
   let remaining = cooked;
   const open = db.productionOrders
-    .filter((order) => order.status === 'open' && order.itemId === itemId && order.startOn <= on)
+    .filter((order) => order.status === 'open' && order.itemId === itemId)
     .sort((a, b) => a.dueOn.localeCompare(b.dueOn));
 
   for (const order of open) {

@@ -83,6 +83,24 @@ test('issuing more than you have is refused unless explicitly allowed', () => {
   assert.equal(onHand(database, 'flour'), 0);
 });
 
+test('a forced issue records the overrun in the ledger', () => {
+  const database = db([purchased('milk')]);
+  receive(database, 'milk', { qty: 100, on: '2026-07-01' });
+
+  const result = issue(database, 'milk', { qty: 250, on: '2026-07-02', allowNegative: true });
+  assert.ok(close(result.shortfall, 150), `got ${result.shortfall}`);
+
+  // The meal was cooked with 250 whatever the lots say: the ledger must
+  // account for all of it, or it cannot explain the production it records.
+  const consumed = database.ledger
+    .filter((txn) => txn.type === 'issue')
+    .reduce((sum, txn) => sum + txn.qty, 0);
+  assert.ok(close(consumed, -250), `ledger accounts for ${consumed}`);
+  const forced = database.ledger.find((txn) => txn.note?.includes('forced'));
+  assert.ok(forced, 'the overrun is its own entry');
+  assert.equal(forced.lotId, undefined, 'with no lot to pretend it came from');
+});
+
 test('expiry reporting counts days from the date asked about', () => {
   const database = pantry();
   receive(database, 'milk', { qty: 500, on: '2026-07-01', expiresOn: '2026-07-04' });

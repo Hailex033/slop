@@ -514,6 +514,42 @@ test('committed batches stay on the prep schedule', () => {
   assert.ok(close(dish.qty, 1500), `got ${dish.qty}`);
 });
 
+test('an overdue open order lands on today, not off the schedule', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-01', slot: 'dinner', itemId: 'dish', servings: 4 });
+  commitProduction(database, runMrp(database, { asOf: '2026-06-30', horizonDays: 7 }));
+
+  // Two days later the meal date has passed and the orders are still open:
+  // late, not gone. MRP counts their output as supply, so prep must still
+  // show the cooking that supply depends on.
+  const later = runMrp(database, { asOf: '2026-07-03', horizonDays: 7 });
+  const days = prepSchedule(database, later);
+
+  assert.ok(days.length > 0, 'the overdue batch is still somebody\'s job');
+  assert.equal(days[0]!.date, '2026-07-03', 'scheduled for today — it cannot be cooked in the past');
+  assert.ok(days[0]!.tasks.some((task) => task.itemId === 'dish'));
+});
+
+test('executing a parent early still settles its future-start child orders', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-05', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 500, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const orderFor = (id: string) => database.productionOrders.find((o) => o.itemId === id)!;
+  assert.equal(orderFor('sauce').startOn, '2026-07-05');
+
+  // Cooking three days ahead of plan cooks the sauce ahead of plan too. Its
+  // order's window has not opened, but the work it stands for is done —
+  // and the output went straight into the dish, so nothing ages on a shelf.
+  executeOrder(database, orderFor('dish').id, { on: '2026-07-02' });
+
+  assert.equal(orderFor('sauce').status, 'received');
+  assert.equal(orderFor('crust').status, 'received');
+});
+
 test('feasibility ignores stock that has gone off', () => {
   const database = nestedDb();
   receive(database, 'sauce', { qty: 1000, on: '2026-07-01', expiresOn: '2026-07-05' });
