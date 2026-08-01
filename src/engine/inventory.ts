@@ -9,7 +9,7 @@
 
 import { conversionContext, isStocked, mustItem } from '../domain/db.js';
 import { addDays, daysBetween, today, type IsoDate } from '../domain/date.js';
-import { ShortageError } from '../domain/errors.js';
+import { MiseError, ShortageError } from '../domain/errors.js';
 import { nextId } from '../domain/ids.js';
 import { convert, type UomCode } from '../domain/units.js';
 import type { Database, InventoryTxn, Item, ItemId, Lot, Storage, TxnType } from '../domain/types.js';
@@ -137,6 +137,15 @@ export interface ReceiveOptions {
 /** Book stock in: a delivery, a harvest, or the output of a production order. */
 export function receive(db: Database, itemId: ItemId, options: ReceiveOptions): Lot {
   const item = mustItem(db, itemId);
+  // A phantom is defined by never being stocked: explosion passes through it,
+  // MRP never nets it, production never issues it. A lot of "soffritto" would
+  // sit in the pantry forever, satisfying nothing. Storable leftovers belong
+  // to a manufactured item instead.
+  if (item.sourcing === 'phantom') {
+    throw new MiseError(
+      `"${item.name}" is a phantom sub-recipe — it is made and used in the moment, never stocked.`,
+    );
+  }
   const on = options.on ?? today();
   const qty = convert(options.qty, options.uom ?? item.stockUom, item.stockUom, conversionContext(item));
 
@@ -331,18 +340,23 @@ export function onOrder(db: Database, itemId: ItemId, by: IsoDate): number {
 }
 
 /**
- * Run `work` as a unit: if it throws, the pantry and the ledger are left
- * exactly as they were.
+ * Run `work` as a unit: if it throws, the pantry, the ledger and the order
+ * book are left exactly as they were.
  *
  * Cooking is a multi-step mutation — issue the mince, issue the passata, book
  * the ragù — and a recipe that fails on its fourth ingredient must not eat the
- * first three. Every mutation in this module goes through lot quantities and
- * the ledger, so restoring those two restores everything.
+ * first three. Every mutation in the engine goes through lot quantities, the
+ * ledger, or an order's status, so restoring those three restores everything.
  */
 export function transactionally<T>(db: Database, work: () => T): T {
   const lots = [...db.lots];
   const quantities = lots.map((lot) => lot.qty);
   const ledgerLength = db.ledger.length;
+  // A cascade can settle a committed order as done mid-cook; if the cook then
+  // fails, the order has to come back too, or the batch it stands for would
+  // never be made.
+  const productionStatuses = db.productionOrders.map((order) => order.status);
+  const purchaseStatuses = db.purchaseOrders.map((order) => order.status);
 
   try {
     return work();
@@ -354,6 +368,12 @@ export function transactionally<T>(db: Database, work: () => T): T {
       lot.qty = quantities[index]!;
     });
     db.ledger.length = ledgerLength;
+    productionStatuses.forEach((status, index) => {
+      db.productionOrders[index]!.status = status;
+    });
+    purchaseStatuses.forEach((status, index) => {
+      db.purchaseOrders[index]!.status = status;
+    });
     throw error;
   }
 }

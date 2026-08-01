@@ -492,6 +492,11 @@ function produceInner(
       cascadedMinutes += inner.minutes;
       shortages.push(...inner.shortages);
       madeToOrder = true;
+      // Cooking the gap inline has, in fact, executed the committed order
+      // that stood for it. Left open, that order would be cooked again —
+      // duplicate stock — while MRP and prep kept counting a commitment
+      // that has already been met.
+      settleCommittedOrders(db, child.id, gap, on);
     }
 
     // `consumeImmediately` decides whether the *output* gets booked into stock.
@@ -606,6 +611,28 @@ function serveInner(
   // were cooked a moment ago or have been sitting in the fridge since Sunday.
   const eaten = issue(db, itemId, { qty, on, ref: `serve:${itemId}`, allowNegative: true });
   return { ...result, qty, servings, cost: eaten.cost };
+}
+
+/**
+ * Apply quantity cooked by a cascade against the open orders it fulfilled.
+ *
+ * Orders are settled earliest-due-first, and only those whose cooking window
+ * has already opened (`startOn <= on`) — those are the ones somebody would
+ * otherwise execute today and cook twice. An order only partially covered
+ * stays open: its remainder genuinely still needs making, and the next
+ * planning run reconciles the overlap against the freshly booked lot.
+ */
+function settleCommittedOrders(db: Database, itemId: ItemId, cooked: number, on: IsoDate): void {
+  let remaining = cooked;
+  const open = db.productionOrders
+    .filter((order) => order.status === 'open' && order.itemId === itemId && order.startOn <= on)
+    .sort((a, b) => a.dueOn.localeCompare(b.dueOn));
+
+  for (const order of open) {
+    if (remaining + 1e-9 < order.qty) break;
+    order.status = 'received';
+    remaining -= order.qty;
+  }
 }
 
 /** Close out an open production order by actually making it. */

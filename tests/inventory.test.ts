@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ShortageError } from '../src/domain/errors.js';
+import { MiseError, ShortageError } from '../src/domain/errors.js';
 import {
   adjust,
   availableOn,
@@ -16,7 +16,7 @@ import {
   sweepExpired,
   usableLots,
 } from '../src/engine/inventory.js';
-import { close, db, purchased } from './helpers.js';
+import { close, db, phantom, purchased } from './helpers.js';
 
 function pantry() {
   return db([purchased('milk', { stockUom: 'ml', shelfLifeDays: 7 }), purchased('flour')]);
@@ -30,6 +30,15 @@ test('receipts create lots and the ledger records them', () => {
   assert.equal(database.ledger.length, 1);
   assert.equal(database.ledger[0]!.type, 'receipt');
   assert.ok(close(stockValue(database), 2));
+});
+
+test('a phantom cannot be received into stock', () => {
+  const database = db([phantom('soffritto'), purchased('onion')]);
+  // A phantom is defined by never being stocked; a lot of it would sit in
+  // the pantry forever, satisfying no demand and issuable by nothing.
+  assert.throws(() => receive(database, 'soffritto', { qty: 300, on: '2026-07-01' }), MiseError);
+  assert.equal(database.lots.length, 0);
+  assert.equal(database.ledger.length, 0);
 });
 
 test('shelf life sets an expiry automatically', () => {

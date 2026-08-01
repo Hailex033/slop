@@ -4,7 +4,7 @@ import { seedDatabase } from '../src/data/seed.js';
 import { onHand, onOrder, receive } from '../src/engine/inventory.js';
 import { commitProduction, runMrp } from '../src/engine/mrp.js';
 import { bySupplier, packsFor, raisePurchaseOrders, receivePurchaseOrder, shoppingList } from '../src/engine/procurement.js';
-import { cookableNow, feasibility, prepSchedule, produce, serve } from '../src/engine/production.js';
+import { cookableNow, executeOrder, feasibility, prepSchedule, produce, serve } from '../src/engine/production.js';
 import { MiseError, ShortageError } from '../src/domain/errors.js';
 import { close, db, made, nestedDb, purchased, recipe } from './helpers.js';
 
@@ -329,6 +329,46 @@ test('prep tasks within a day run deepest-first', () => {
   assert.ok(positionOf('ragu') < positionOf('lasagne'), 'the ragù before the lasagne');
   assert.ok(positionOf('besciamella') < positionOf('lasagne'));
   assert.ok(positionOf('pasta-sheets') < positionOf('lasagne'));
+});
+
+test('executing a parent order settles the child orders its cascade cooked', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 500, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const orderFor = (id: string) => database.productionOrders.find((o) => o.itemId === id)!;
+  assert.equal(orderFor('sauce').status, 'open');
+
+  // Cooking the dish cascades into the sauce and the crust — the same
+  // batches the committed child orders stand for.
+  executeOrder(database, orderFor('dish').id, { on: '2026-07-03' });
+
+  assert.equal(orderFor('sauce').status, 'received', 'the cascade executed it');
+  assert.equal(orderFor('crust').status, 'received');
+  assert.equal(orderFor('dish').status, 'received');
+  assert.throws(() => executeOrder(database, orderFor('sauce').id), /already done/);
+});
+
+test('a failed cook puts settled child orders back', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  // Butter and flour for the sub-recipes, but no cheese: the dish fails on
+  // its last component, after both cascades have already settled orders.
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const orderFor = (id: string) => database.productionOrders.find((o) => o.itemId === id)!;
+
+  assert.throws(() => executeOrder(database, orderFor('dish').id, { on: '2026-07-03' }), ShortageError);
+
+  assert.equal(orderFor('sauce').status, 'open', 'the settled order came back with the rollback');
+  assert.equal(orderFor('crust').status, 'open');
+  assert.equal(orderFor('dish').status, 'open');
+  assert.equal(onHand(database, 'butter'), 500, 'and so did the butter');
 });
 
 test('committed batches stay on the prep schedule', () => {

@@ -835,7 +835,11 @@ const commands: Record<string, Command> = {
       const target = targetOf(ctx, ref);
 
       if (boolFlag(ctx.args, 'dry')) {
-        const check = feasibility(ctx.db, target.itemId, target.servings);
+        // From scratch, because that is what the real command below does: it
+        // always makes a new batch. Counting finished stock of the dish here
+        // would say "everything is in the house" right before the actual
+        // cook, which ignores that stock, fails for missing ingredients.
+        const check = feasibility(ctx.db, target.itemId, target.servings, undefined, true);
         out(f.heading(`Dry run — ${check.name} × ${f.num(target.servings)}`));
         out();
         out(`  Coverage: ${f.bar(check.coverage, 20)} ${f.percent(check.coverage)}`);

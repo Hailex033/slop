@@ -28,7 +28,9 @@ test('a shared ingredient is netted exactly once, at its deepest level', () => {
 test('phantoms pass demand straight through without being stocked or ordered', () => {
   const database = nestedDb();
   planned(database, 'dish', 4, '2026-07-02');
-  receive(database, 'roux', { qty: 500, on: '2026-07-01' }); // should be ignored
+  // `receive` refuses phantom lots outright, but a hand-edited database file
+  // can still contain one — MRP must ignore it rather than net against it.
+  database.lots.push({ id: 'LOT-X', itemId: 'roux', qty: 500, receivedOn: '2026-07-01' });
 
   const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
   const roux = result.lines.find((line) => line.itemId === 'roux')!;
