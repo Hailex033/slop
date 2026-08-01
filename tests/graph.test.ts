@@ -137,11 +137,15 @@ test('a negative conversion coefficient is an integrity problem', () => {
   const database = db([
     purchased('oil', { stockUom: 'ml', densityGPerMl: -0.9 }),
     purchased('egg2', { stockUom: 'ea', unitWeightG: 0 }),
+    // Expires before it arrives; a buffer floor below empty.
+    purchased('sad-yog', { shelfLifeDays: -3, safetyStock: -1 }),
   ]);
 
   const issues = validate(database);
   assert.ok(issues.some((issue) => issue.includes('non-positive densityGPerMl')), JSON.stringify(issues));
   assert.ok(issues.some((issue) => issue.includes('non-positive unitWeightG')));
+  assert.ok(issues.some((issue) => issue.includes('invalid shelfLifeDays of -3')));
+  assert.ok(issues.some((issue) => issue.includes('invalid safetyStock of -1')));
 });
 
 test('impossible served counts and orphaned orders are integrity problems', () => {
@@ -234,11 +238,22 @@ test('order quantities and dates are integrity-checked too', () => {
     id: 'PO-1', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: 'someday' as never, status: 'open',
     lines: [{ itemId: 'flour', packs: 1, unitPrice: 1 }],
   });
+  // Individually valid dates, impossibly ordered: supply before the batch
+  // could exist, a delivery before the order was placed.
+  database.productionOrders.push({
+    id: 'PRD-3', itemId: 'flour', qty: 100, dueOn: '2026-07-03', startOn: '2026-07-05', status: 'open',
+  });
+  database.purchaseOrders.push({
+    id: 'PO-2', supplierId: 'shop', orderedOn: '2026-07-05', expectedOn: '2026-07-03', status: 'open',
+    lines: [{ itemId: 'flour', packs: 1, unitPrice: 1 }],
+  });
 
   const issues = validate(database);
   assert.ok(issues.some((i) => i.includes('invalid qty (0)')), JSON.stringify(issues));
   assert.ok(issues.some((i) => i.includes('invalid dueOn date "2026-02-30"')));
   assert.ok(issues.some((i) => i.includes('invalid expectedOn date "someday"')));
+  assert.ok(issues.some((i) => i.includes('starts on 2026-07-05, after it is due')));
+  assert.ok(issues.some((i) => i.includes('expected on 2026-07-03, before it was ordered')));
 });
 
 test('two recipes for one item is an integrity problem, not a quiet last-wins', () => {

@@ -283,6 +283,16 @@ export function validate(db: Database): string[] {
         issues.push(`Item "${item.id}" has a non-positive ${field} of ${value}.`);
       }
     }
+    // A negative shelf life expires food before it arrives; a negative
+    // safety stock is a floor below empty. Both poison every keeping and
+    // netting window they touch. (Zero is fine for each: use-today food,
+    // and no buffer.)
+    if (item.shelfLifeDays !== undefined && (!Number.isFinite(item.shelfLifeDays) || item.shelfLifeDays < 0)) {
+      issues.push(`Item "${item.id}" has an invalid shelfLifeDays of ${item.shelfLifeDays}.`);
+    }
+    if (item.safetyStock !== undefined && (!Number.isFinite(item.safetyStock) || item.safetyStock < 0)) {
+      issues.push(`Item "${item.id}" has an invalid safetyStock of ${item.safetyStock}.`);
+    }
     if (item.sourcing === 'purchased' && !item.purchase) {
       issues.push(`Purchased item "${item.id}" has no purchase info (supplier, pack, price).`);
     }
@@ -436,6 +446,11 @@ export function validate(db: Database): string[] {
     if (!isIsoDate(order.expectedOn)) {
       issues.push(`Purchase order "${order.id}" has an invalid expectedOn date "${order.expectedOn}".`);
     }
+    if (isIsoDate(order.orderedOn) && isIsoDate(order.expectedOn) && order.expectedOn < order.orderedOn) {
+      issues.push(
+        `Purchase order "${order.id}" is expected on ${order.expectedOn}, before it was ordered (${order.orderedOn}).`,
+      );
+    }
     for (const line of order.lines) {
       if (!findItem(db, line.itemId)) {
         issues.push(`Purchase order "${order.id}" has a line for unknown item "${line.itemId}".`);
@@ -469,6 +484,14 @@ export function validate(db: Database): string[] {
     }
     if (!isIsoDate(order.startOn)) {
       issues.push(`Production order "${order.id}" has an invalid startOn date "${order.startOn}".`);
+    }
+    // MRP counts the output as supply from dueOn while prep schedules the
+    // work at startOn: inverted, the supply exists before the batch could,
+    // quietly suppressing the replacement production and purchasing.
+    if (isIsoDate(order.dueOn) && isIsoDate(order.startOn) && order.startOn > order.dueOn) {
+      issues.push(
+        `Production order "${order.id}" starts on ${order.startOn}, after it is due (${order.dueOn}).`,
+      );
     }
   }
   // History references items too. The ledger is read-only, so a hole here
