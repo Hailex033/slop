@@ -109,7 +109,12 @@ export function parseDate(input: string, now: IsoDate = today()): IsoDate {
   const offset = /^([+-]\d+)d?$/.exec(text);
   if (offset) return addDays(now, Number(offset[1]));
 
-  const weekdayIndex = WEEKDAYS.findIndex((d) => d.toLowerCase() === text.slice(0, 3));
+  // Exact abbreviation or exact full name only. Matching on the first three
+  // letters of whatever was typed quietly booked "monkey" in for Monday.
+  const FULL_WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const weekdayIndex = WEEKDAYS.findIndex(
+    (d, index) => text === d.toLowerCase() || text === FULL_WEEKDAYS[index],
+  );
   if (weekdayIndex >= 0) {
     // The next occurrence of that weekday, today included.
     for (let i = 0; i < 7; i += 1) {

@@ -43,6 +43,14 @@ test('parses the shorthands people actually type', () => {
   // 30 July 2026 is a Thursday, so the next Saturday is the 1st.
   assert.equal(parseDate('sat', '2026-07-30'), '2026-08-01');
   assert.equal(parseDate('thu', '2026-07-30'), '2026-07-30', 'today counts');
+  assert.equal(parseDate('saturday', '2026-07-30'), '2026-08-01', 'full names too');
+});
+
+test('a weekday must be exact, not a prefix of whatever was typed', () => {
+  // "monkey" used to book a meal in for Monday.
+  assert.throws(() => parseDate('monkey', '2026-07-30'), MiseError);
+  assert.throws(() => parseDate('fridayx', '2026-07-30'), MiseError);
+  assert.throws(() => parseDate('mo', '2026-07-30'), MiseError);
 });
 
 test('date arithmetic crosses months and years', () => {

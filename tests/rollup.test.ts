@@ -317,6 +317,26 @@ test('the example lasagne costs a plausible amount per serving', () => {
   assert.ok(report.perServing > 1 && report.perServing < 10, `got ${report.perServing}`);
 });
 
+test('passive overhead is charged once, not once per batch', () => {
+  const database = db(
+    [purchased('mince'), made('ragu')],
+    [
+      recipe('ragu', 1000, [{ itemId: 'mince', qty: 500, uom: 'g' }], {
+        steps: [
+          { text: 'brown', activeMin: 10 },
+          { text: 'simmer', passiveMin: 60 },
+        ],
+      }),
+    ],
+  );
+  database.settings = { ...database.settings, overheadPerHour: 60 }; // £1 a minute
+
+  // Two batches: browning twice, one shared simmer — 80 minutes of hob, not
+  // 140. The same policy runMinutes applies to the clock applies to the bill.
+  const report = costOf(database, 'ragu', 2000, 'g');
+  assert.ok(close(report.overhead, 80), `got ${report.overhead}`);
+});
+
 test('a recipe hole is reported, not priced as free food', () => {
   const database = db(
     [purchased('flour'), made('bread')],

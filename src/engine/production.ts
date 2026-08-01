@@ -253,7 +253,14 @@ function netRequirements(
   for (const component of recipe.components) {
     if (component.optional) continue;
     const child = findItem(db, component.itemId);
-    if (!child) continue;
+    if (!child) {
+      // A dangling reference is a hard shortfall: production refuses to cook
+      // this recipe, so feasibility must not advertise it as makeable —
+      // "Cook now" offering unlimited servings of a dish that fails on click.
+      const wanted = component.scalable === false ? component.qty : component.qty * batches;
+      shortfalls.set(component.itemId, (shortfalls.get(component.itemId) ?? 0) + wanted);
+      continue;
+    }
     const scaled = component.scalable === false ? component.qty : component.qty * batches;
     const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));
     const gross = component.lossPct ? net / (1 - component.lossPct) : net;
@@ -355,8 +362,15 @@ export function feasibility(
 
 
   const missing: Shortage[] = [...shortfalls.entries()].map(([shortId, short]) => {
-    const shortItem = mustItem(db, shortId);
-    return { itemId: shortId, name: shortItem.name, short, uom: shortItem.stockUom };
+    // A shortfall can name an item a hand edit has deleted; report it by id
+    // rather than crashing the report that exists to reveal it.
+    const shortItem = findItem(db, shortId);
+    return {
+      itemId: shortId,
+      name: shortItem?.name ?? `${shortId} (not in the item master)`,
+      short,
+      uom: shortItem?.stockUom ?? '?',
+    };
   });
 
   const servings = maxFeasibleServings(db, itemId, probe, asOf, fromScratch);

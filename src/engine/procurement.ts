@@ -219,7 +219,10 @@ export function raisePurchaseOrders(
 
   const trips = new Map<string, Trip>();
   for (const line of list.lines) {
-    if (!line.supplierId || line.packs <= 0) continue;
+    // An unresolved line is a question, not an order: committing one would
+    // turn "no price on file" into a free purchase and a zero-cost receipt.
+    // It stays on the list's unresolved report until the data is fixed.
+    if (!line.supplierId || line.packs <= 0 || line.problem) continue;
     const leadTimeDays = leadTimeFor(db, line.itemId);
     const key = `${line.supplierId}@${line.orderBy}@${leadTimeDays}`;
     const trip = trips.get(key);

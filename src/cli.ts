@@ -290,7 +290,11 @@ const commands: Record<string, Command> = {
       );
 
       const leaves = aggregate(tree, { level: 'leaves' });
-      const time = rollupTime(ctx.db, target.itemId, target.qty, target.uom);
+      // Same toggle as the tree above it: with --optional the branch is
+      // displayed, so its minutes belong in the headline too.
+      const time = rollupTime(ctx.db, target.itemId, target.qty, target.uom, {
+        includeOptional: boolFlag(ctx.args, 'optional'),
+      });
       out();
       out(
         f.style(

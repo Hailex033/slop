@@ -202,8 +202,11 @@ export function costOf(
     );
     const batches = batchQty === 0 ? 0 : quantity / batchQty;
 
+    // The batch policy is `runMinutes`': hands-on repeats per batch, the
+    // simmering and proving run alongside one another. Charging passive time
+    // once per batch costed two pots on one hob as two hobs.
     const time = recipeMinutes(recipe);
-    overhead += ((time.active + time.passive) / 60) * db.settings.overheadPerHour * batches;
+    overhead += ((time.active * batches + time.passive) / 60) * db.settings.overheadPerHour;
 
     for (const component of recipe.components) {
       if (component.optional && !includeOptional) continue;

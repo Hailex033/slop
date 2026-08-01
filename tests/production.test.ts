@@ -134,6 +134,39 @@ test('a receipt that fails mid-order books nothing at all', () => {
   assert.equal(order.status, 'open', 'so the order can be corrected and received exactly once');
 });
 
+test('an unresolved line is never committed into an order', () => {
+  const database = nestedDb();
+  database.items.push({
+    id: 'mystery', name: 'mystery', category: 'Test', sourcing: 'purchased', stockUom: 'g',
+    // Supplier and pack on file, price hand-mangled: reported, not ordered.
+    purchase: { supplierId: 'shop', packQty: 100, packUom: 'g', packPrice: Number.NaN, leadTimeDays: 0 },
+  });
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'mystery', servings: 100 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  assert.equal(list.unresolved.length, 1, 'the missing price is reported');
+
+  const orders = raisePurchaseOrders(database, list, '2026-07-01');
+  assert.ok(
+    orders.every((order) => order.lines.every((line) => line.itemId !== 'mystery')),
+    'a question is not an order',
+  );
+});
+
+test('a recipe hole makes a dish infeasible, not unlimited', () => {
+  const database = nestedDb();
+  database.items = database.items.filter((item) => item.id !== 'cheese');
+  receive(database, 'butter', { qty: 5000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 5000, on: '2026-06-30' });
+
+  const check = feasibility(database, 'dish', 4, '2026-07-01', true);
+  assert.ok(check.servings < 0.01, `got ${check.servings}`);
+  assert.ok(
+    check.missing.some((m) => m.itemId === 'cheese' && m.name.includes('not in the item master')),
+    JSON.stringify(check.missing),
+  );
+});
+
 test('a free item is priced at zero, not flagged as unpriced', () => {
   const database = nestedDb();
   // The seeded sourdough starter's shape: a standing item replenished for
