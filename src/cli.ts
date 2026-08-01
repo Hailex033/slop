@@ -111,8 +111,13 @@ export function parseArgs(argv: readonly string[], booleans: ReadonlySet<string>
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]!;
     if (token.startsWith('--')) {
-      const [rawKey, inlineValue] = token.slice(2).split('=', 2);
-      const key = rawKey!;
+      // Split at the *first* `=` only, keeping the rest of the value intact:
+      // split-with-limit truncates, so `--db=/tmp/mise=prod.json` would
+      // quietly become /tmp/mise and overwrite an unrelated file.
+      const raw = token.slice(2);
+      const eq = raw.indexOf('=');
+      const key = eq === -1 ? raw : raw.slice(0, eq);
+      const inlineValue = eq === -1 ? undefined : raw.slice(eq + 1);
       if (inlineValue !== undefined) {
         flags[key] = inlineValue;
       } else if (!booleans.has(key) && isValue(argv[i + 1])) {

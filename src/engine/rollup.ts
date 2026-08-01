@@ -596,12 +596,15 @@ export function runMinutesWithPhantoms(
   seen: ReadonlySet<ItemId> = new Set(),
 ): { active: number; passive: number; total: number } {
   const own = runMinutes(recipe, batches);
-  let active = own.active;
-  // Hands-on time serialises — one cook — so phantom actives sum. Their
-  // waits do not: two doughs rest side by side, so sibling passives combine
-  // as the longest, and the parent's own wait follows after. Summing them
-  // planned two independent five-hour rests as ten and started days early.
-  let longestChildPassive = 0;
+  // Hands-on time serialises — one cook — while waits run unattended. Each
+  // phantom is a job of hands-on work followed by a residual wait, and the
+  // cook staggers the jobs longest-wait-first, so one dough's five-hour
+  // rest absorbs another job's five hours of mixing instead of stacking on
+  // top of it. The parent's own hands-on comes after the children are ready
+  // — assembly cannot start before the dough has proved — with its own wait
+  // last. (An estimate, like all of prep: it assumes one cook and treats
+  // each job's hands-on as one block.)
+  const jobs: { active: number; tail: number }[] = [];
 
   for (const component of recipe.components) {
     // The same toggle the plan used: an optional phantom whose ingredients
@@ -626,12 +629,20 @@ export function runMinutesWithPhantoms(
       includeOptional,
       new Set(seen).add(item.id),
     );
-    active += inner.active;
-    longestChildPassive = Math.max(longestChildPassive, inner.passive);
+    jobs.push({ active: inner.active, tail: inner.total - inner.active });
   }
 
-  const passive = own.passive + longestChildPassive;
-  return { active, passive, total: active + passive };
+  jobs.sort((a, b) => b.tail - a.tail);
+  let handsOn = 0;
+  let childrenMakespan = 0;
+  for (const job of jobs) {
+    handsOn += job.active;
+    childrenMakespan = Math.max(childrenMakespan, handsOn + job.tail);
+  }
+
+  const active = own.active + handsOn;
+  const total = childrenMakespan + own.active + own.passive;
+  return { active, passive: total - active, total };
 }
 
 export interface TimeRollup {

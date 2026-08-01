@@ -61,6 +61,16 @@ test('an empty numeric value is rejected, not read as zero', () => {
   assert.throws(() => numberFlag({ positionals: [], flags: { horizon: '' } }, 'horizon', 7), MiseError);
 });
 
+test('an inline value keeps every character after the first =', () => {
+  // split-with-limit truncates: `--db=/tmp/mise=prod.json` must not quietly
+  // become /tmp/mise and overwrite whatever lives there.
+  const args = parseArgs(['--db=/tmp/mise=prod.json'], new Set());
+  assert.equal(args.flags['db'], '/tmp/mise=prod.json');
+
+  // The empty inline value still reads as supplied-but-empty, not boolean.
+  assert.equal(parseArgs(['--db='], new Set()).flags['db'], '');
+});
+
 test('a supplied string flag must actually have a value', () => {
   // `mise init --db --force`: bare `--db` parses as boolean true, and a
   // silent fall-back to the default path would overwrite the very database

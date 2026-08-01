@@ -735,6 +735,36 @@ test('sibling phantom rests overlap; they do not stack', () => {
   assert.equal(run.minutes, 330);
 });
 
+test('unequal sibling waits stagger: the long rest absorbs the other job', () => {
+  const database = db(
+    [purchased('flour'), purchased('milk2'), phantom('slowdough'), phantom('quickmix'), made('bake2')],
+    [
+      recipe('slowdough', 500, [{ itemId: 'flour', qty: 300, uom: 'g' }], {
+        steps: [{ text: 'brief knead, long rest', activeMin: 60, passiveMin: 300 }],
+      }),
+      recipe('quickmix', 500, [{ itemId: 'milk2', qty: 300, uom: 'g' }], {
+        steps: [{ text: 'long work, brief rest', activeMin: 300, passiveMin: 60 }],
+      }),
+      recipe('bake2', 1000, [
+        { itemId: 'slowdough', qty: 500, uom: 'g' },
+        { itemId: 'quickmix', qty: 500, uom: 'g' },
+      ]),
+    ],
+  );
+  planned(database, 'bake2', 1, '2026-07-03');
+
+  const run = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }).production.find(
+    (order) => order.itemId === 'bake2',
+  )!;
+
+  // Start the long rest first: its five hours absorb the other job's five
+  // hours of mixing. Seven hours, not eleven — the difference between
+  // cooking on the day and being told to start the day before.
+  assert.equal(run.activeMin, 360);
+  assert.equal(run.minutes, 420);
+  assert.equal(run.startOn, run.dueOn, 'one day of cooking, started on the day');
+});
+
 test("a phantom's work is folded into the run that consumes it", () => {
   const database = db(
     [purchased('flour'), phantom('dough'), made('sheets')],
