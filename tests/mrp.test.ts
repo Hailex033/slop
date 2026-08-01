@@ -679,6 +679,46 @@ test('an overdue perishable order is supply for today, not for its past self', (
   assert.equal(result.production.filter((o) => o.itemId === 'sauce').length, 0, 'the open order covers it');
 });
 
+test('an overdue order wants its ingredients today, not in the past', () => {
+  const database = db(
+    [purchased('tomato', { shelfLifeDays: 3 }), made('sauce')],
+    [recipe('sauce', 1000, [{ itemId: 'tomato', qty: 500, uom: 'g' }])],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-01', slot: 'dinner', itemId: 'sauce', servings: 1 });
+  commitProduction(database, runMrp(database, { asOf: '2026-06-30', horizonDays: 7 }));
+
+  // The batch slipped; tomatoes arrived after its scheduled start. Cooked
+  // today, the order uses them — demand dated on the old startOn could not
+  // see stock received since, and bought the same tomatoes again.
+  receive(database, 'tomato', { qty: 500, on: '2026-07-04' });
+
+  const result = runMrp(database, { asOf: '2026-07-05', horizonDays: 7 });
+  assert.ok(!result.purchases.some((line) => line.itemId === 'tomato'), 'the fresh tomatoes cover it');
+});
+
+test('an overdue perishable delivery is fresh from today, not spoiled in transit', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, shelfLifeDays: 2 } : item,
+  );
+  database.purchaseOrders.push({
+    id: 'PO-0001',
+    supplierId: 'shop',
+    orderedOn: '2026-06-28',
+    expectedOn: '2026-06-29',
+    status: 'open',
+    lines: [{ itemId: 'cheese', packs: 2, packQty: 100, packUom: 'g', unitPrice: 1 }],
+  });
+  planned(database, 'cheese', 200, '2026-07-06');
+
+  const result = runMrp(database, { asOf: '2026-07-05', horizonDays: 7 });
+  const cheese = result.lines.find((line) => line.itemId === 'cheese')!;
+
+  // Received today, the two-day life runs to the 7th — good for the 6th.
+  assert.ok(close(cheese.onOrder, 200), `got ${cheese.onOrder}`);
+  assert.ok(!result.purchases.some((line) => line.itemId === 'cheese'), 'not ordered twice');
+});
+
 test('a hole in a recipe is a planning problem, not a silent omission', () => {
   const database = db(
     [purchased('flour'), made('bread')],

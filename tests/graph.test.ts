@@ -83,6 +83,19 @@ test('validation catches dangling references and impossible conversions', () => 
   assert.ok(issues.some((issue) => issue.includes('densityGPerMl')));
 });
 
+test('two recipes for one item is an integrity problem, not a quiet last-wins', () => {
+  const database = db(
+    [purchased('flour'), made('bread')],
+    [
+      recipe('bread', 1000, [{ itemId: 'flour', qty: 600, uom: 'g' }]),
+      { ...recipe('bread', 800, [{ itemId: 'flour', qty: 500, uom: 'g' }]), id: 'r-bread-2' },
+    ],
+  );
+
+  const issues = validate(database);
+  assert.ok(issues.some((issue) => issue.includes('more than one recipe')), JSON.stringify(issues));
+});
+
 test('where-used shows one entry per parent, lines combined', () => {
   const database = db(
     [purchased('flour'), made('sheets')],

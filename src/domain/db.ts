@@ -245,9 +245,20 @@ export function validate(db: Database): string[] {
   }
 
   const seenRecipeIds = new Set<string>();
+  const seenOutputs = new Set<ItemId>();
   for (const recipe of db.recipes) {
     if (seenRecipeIds.has(recipe.id)) issues.push(`Duplicate recipe id "${recipe.id}".`);
     seenRecipeIds.add(recipe.id);
+    // The recipe index keeps exactly one recipe per output item, so a second
+    // one silently loses — and every explosion, costing and plan would then
+    // depend on array order while doctor called the database valid.
+    if (seenOutputs.has(recipe.outputItemId)) {
+      issues.push(
+        `Item "${recipe.outputItemId}" has more than one recipe ` +
+          `("${recipe.id}" among them); only one would ever be used.`,
+      );
+    }
+    seenOutputs.add(recipe.outputItemId);
 
     const output = findItem(db, recipe.outputItemId);
     if (!output) {

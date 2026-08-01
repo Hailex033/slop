@@ -300,7 +300,10 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
     // even though it covers its own parent demand. Skipping this is what would
     // let `mrp --commit` silently empty the shopping list.
     for (const firm of firmOrders) {
-      explodeOneLevel(db, itemId, firm.qty, firm.startOn, level, [firm.id], addDemand, options.includeOptional, reportMissing);
+      // An overdue order cooks today, so its ingredients are needed today —
+      // not on the startOn that already slipped past, where stock received
+      // since then is invisible to the dated allocator and gets bought twice.
+      explodeOneLevel(db, itemId, firm.qty, maxDate(asOf, firm.startOn), level, [firm.id], addDemand, options.includeOptional, reportMissing);
     }
 
     if (net <= 1e-9) continue;
@@ -507,10 +510,15 @@ function supplyFor(
       const packQty = line.packQty ?? item.purchase?.packQty;
       const packUom = line.packUom ?? item.purchase?.packUom;
       if (packQty === undefined || packUom === undefined) continue;
-      const until = spoilsOn(order.expectedOn);
+      // An overdue delivery lands today at the earliest, and its shelf life
+      // runs from the day it actually arrives — the same re-dating firm
+      // production gets. On the historical dates a late perishable delivery
+      // looked spoiled in transit and was ordered again.
+      const lands = maxDate(asOf, order.expectedOn);
+      const until = spoilsOn(lands);
       buckets.push({
         qty: convert(line.packs * packQty, packUom, item.stockUom, conversionContext(item)),
-        from: order.expectedOn,
+        from: lands,
         ...(until ? { until } : {}),
         kind: 'order',
       });
