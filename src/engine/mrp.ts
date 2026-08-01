@@ -191,6 +191,13 @@ export function demandFromPlan(
 export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
   const asOf = options.asOf ?? today();
   const horizonDays = options.horizonDays ?? db.settings.planningHorizonDays;
+  // A zero horizon ends the window yesterday and reports an empty plan as
+  // success; a fraction breaks day arithmetic. Neither is a plan.
+  if (!Number.isInteger(horizonDays) || horizonDays < 1) {
+    throw new MiseError(
+      `The planning horizon must be a whole number of days, at least 1 — not ${horizonDays}.`,
+    );
+  }
   const codes = lowLevelCodes(db);
 
   const demandsByItem = new Map<ItemId, Demand[]>();
@@ -619,11 +626,15 @@ function supplyFor(
 
   for (const order of firmOrders) {
     // An overdue order is executed today, not on its historical due date —
-    // the prep schedule already re-dates it — so its output exists from
-    // today and keeps from today. Left on the old dates, a perishable
-    // overdue batch looked spoiled-before-needed and the same quantity was
-    // planned a second time while the order still sat open.
-    const lands = maxDate(asOf, order.dueOn);
+    // the prep schedule already re-dates it — but started today it still
+    // takes its planned span to finish: the output exists from the earliest
+    // *completion*, and keeps from then. Crediting it on the new start
+    // suppressed the replacement for a meal the batch cannot reach, while
+    // execution books the lot days later. Left on the old dates entirely, a
+    // perishable overdue batch looked spoiled-before-needed and was planned
+    // a second time while the order still sat open.
+    const span = Math.max(0, daysBetween(order.startOn, order.dueOn));
+    const lands = maxDate(order.dueOn, addDays(asOf, span));
     const until = spoilsOn(lands);
     buckets.push({ qty: order.qty, from: lands, ...(until ? { until } : {}), kind: 'order' });
   }

@@ -254,6 +254,8 @@ test('order quantities and dates are integrity-checked too', () => {
   assert.ok(issues.some((i) => i.includes('invalid expectedOn date "someday"')));
   assert.ok(issues.some((i) => i.includes('starts on 2026-07-05, after it is due')));
   assert.ok(issues.some((i) => i.includes('expected on 2026-07-03, before it was ordered')));
+  // And all three orders target purchased flour — unmakeable commitments.
+  assert.ok(issues.some((i) => i.includes('only manufactured items are made')));
 });
 
 test('two recipes for one item is an integrity problem, not a quiet last-wins', () => {

@@ -470,8 +470,17 @@ export function validate(db: Database): string[] {
     }
   }
   for (const order of db.productionOrders) {
-    if (!findItem(db, order.itemId)) {
+    const target = findItem(db, order.itemId);
+    if (!target) {
       issues.push(`Production order "${order.id}" references unknown item "${order.itemId}".`);
+    } else if (target.sourcing !== 'manufactured') {
+      // MRP would credit the order as inbound supply — suppressing the real
+      // purchase or production — while execution can never complete it: a
+      // purchased item has no recipe, and a phantom cannot enter stock.
+      issues.push(
+        `Production order "${order.id}" is for "${target.name}", which is ${target.sourcing} — ` +
+          `only manufactured items are made.`,
+      );
     }
     // A zero or negative batch cannot be cooked — produce refuses it — yet
     // MRP and prep would keep processing the commitment forever, in a

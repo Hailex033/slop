@@ -142,6 +142,38 @@ test('a committed optional policy survives replanning a stocked child', () => {
   assert.equal(relishOrder.includeOptional, true);
 });
 
+test('overdue multi-day supply lands when the batch can finish, not when it starts', () => {
+  const database = db(
+    [purchased('flour'), made('slowbread')],
+    [
+      recipe('slowbread', 1000, [{ itemId: 'flour', qty: 600, uom: 'g' }], {
+        servings: 2,
+        steps: [{ text: 'long prove', activeMin: 30, passiveMin: 960 }],
+      }),
+    ],
+  );
+  // Committed to span the 1st to the 3rd, never started.
+  database.productionOrders.push({
+    id: 'PRD-1', itemId: 'slowbread', qty: 1000, dueOn: '2026-07-03', startOn: '2026-07-01', status: 'open',
+  });
+  planned(database, 'slowbread', 2, '2026-07-05');
+
+  // As of the 5th: started today, the batch finishes on the 7th. Crediting
+  // it to tonight would suppress the replacement while execution books the
+  // lot two days after the dinner.
+  const result = runMrp(database, { asOf: '2026-07-05', horizonDays: 7 });
+  const line = result.lines.find((l) => l.itemId === 'slowbread')!;
+  assert.ok(line.net > 0, 'the overdue batch cannot feed tonight');
+  assert.ok(result.conflicts.some((c) => c.includes('slowbread')), JSON.stringify(result.conflicts));
+});
+
+test('a planning horizon must be a whole positive number of days', () => {
+  const database = db([purchased('flour')]);
+  assert.throws(() => runMrp(database, { asOf: '2026-07-01', horizonDays: 0 }), /horizon/i);
+  assert.throws(() => runMrp(database, { asOf: '2026-07-01', horizonDays: 2.5 }), /horizon/i);
+  assert.throws(() => runMrp(database, { asOf: '2026-07-01', horizonDays: -3 }), /horizon/i);
+});
+
 test('a run that cannot finish in time is a conflict, not a commitment', () => {
   const database = db(
     [purchased('flour'), made('slowloaf')],

@@ -994,6 +994,15 @@ export function raiseProductionOrder(
   qty: number,
   dueOn: IsoDate,
 ): ProductionOrder {
+  const item = mustItem(db, itemId);
+  // MRP would credit the order as inbound supply — suppressing the real
+  // purchase — while execution can never complete it: a purchased item has
+  // no recipe to cook, and a phantom's output cannot enter stock.
+  if (item.sourcing !== 'manufactured') {
+    throw new MiseError(
+      `"${item.name}" is ${item.sourcing} — only manufactured items can go on a production order.`,
+    );
+  }
   const order: ProductionOrder = {
     id: nextId('PRD', db.productionOrders),
     itemId,

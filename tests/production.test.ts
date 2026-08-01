@@ -428,6 +428,19 @@ test('two visits to the same supplier are two trips on the shopping list', () =>
   assert.ok(groups.every((g) => g.supplier === 'Shop'));
 });
 
+test('production orders exist only for things that can be made', () => {
+  const database = db(
+    [purchased('flour'), phantom('mix2')],
+    [recipe('mix2', 100, [{ itemId: 'flour', qty: 100, uom: 'g' }])],
+  );
+
+  // MRP would credit either as inbound supply while execution can never
+  // complete them: nothing to cook, or nothing that can enter stock.
+  assert.throws(() => raiseProductionOrder(database, 'flour', 100, '2026-07-03'), /purchased/);
+  assert.throws(() => raiseProductionOrder(database, 'mix2', 100, '2026-07-03'), /phantom/);
+  assert.equal(database.productionOrders.length, 0);
+});
+
 test('a zero-quantity order line blocks the receipt instead of vanishing', () => {
   const database = db([purchased('flour')]);
   database.purchaseOrders.push({

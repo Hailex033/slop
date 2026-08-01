@@ -171,6 +171,17 @@ function boolFlag(args: Args, name: string): boolean {
   return args.flags[name] === true || args.flags[name] === 'true';
 }
 
+/** A `--horizon` that could actually be planned: whole days, at least one. */
+export function horizonFlag(args: Args, fallback: number): number {
+  const days = numberFlag(args, 'horizon', fallback);
+  // Zero ends the window yesterday and reports an empty plan — and a
+  // successful zero-order commit — while a fraction breaks day arithmetic.
+  if (!Number.isInteger(days) || days < 1) {
+    throw new MiseError(`--horizon must be a whole number of days, at least 1 — not ${days}.`);
+  }
+  return days;
+}
+
 // `mise tree lasagne | head` closes stdout early. That is the reader saying
 // "enough", not an error: exit quietly instead of dying with an EPIPE stack,
 // the way every other well-behaved CLI does.
@@ -738,7 +749,7 @@ const commands: Record<string, Command> = {
       }
 
       const from = today();
-      const horizon = numberFlag(ctx.args, 'horizon', 14);
+      const horizon = horizonFlag(ctx.args, 14);
       // Same inclusive window as MRP: a 7-day horizon is today plus six, so
       // the plan shown here and the plan `mrp`/`shop`/`prep` act on agree
       // about which entries are in scope.
@@ -786,7 +797,7 @@ const commands: Record<string, Command> = {
     group: 'planning',
     run: (ctx) => {
       const result = runMrp(ctx.db, {
-        horizonDays: numberFlag(ctx.args, 'horizon', ctx.db.settings.planningHorizonDays),
+        horizonDays: horizonFlag(ctx.args, ctx.db.settings.planningHorizonDays),
         ignoreStock: boolFlag(ctx.args, 'ignore-stock'),
         includeOptional: boolFlag(ctx.args, 'optional'),
       });
@@ -839,7 +850,7 @@ const commands: Record<string, Command> = {
     group: 'planning',
     run: (ctx) => {
       const mrp = runMrp(ctx.db, {
-        horizonDays: numberFlag(ctx.args, 'horizon', ctx.db.settings.planningHorizonDays),
+        horizonDays: horizonFlag(ctx.args, ctx.db.settings.planningHorizonDays),
         includeOptional: boolFlag(ctx.args, 'optional'),
       });
       const list = shoppingList(ctx.db, mrp);
@@ -891,7 +902,7 @@ const commands: Record<string, Command> = {
     group: 'planning',
     run: (ctx) => {
       const mrp = runMrp(ctx.db, {
-        horizonDays: numberFlag(ctx.args, 'horizon', ctx.db.settings.planningHorizonDays),
+        horizonDays: horizonFlag(ctx.args, ctx.db.settings.planningHorizonDays),
         includeOptional: boolFlag(ctx.args, 'optional'),
       });
       const days = prepSchedule(ctx.db, mrp);
