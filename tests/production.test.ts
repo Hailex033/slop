@@ -882,6 +882,23 @@ test('serving planned meals one by one still cooks the committed batch once', ()
   assert.ok(close(onHand(database, 'sachet2'), 0), 'one making, one sachet');
 });
 
+test('exactly one serving of stock is one cookable serving', () => {
+  const database = db(
+    [purchased('flour'), made('bun')],
+    [recipe('bun', 600, [{ itemId: 'flour', qty: 600, uom: 'g' }], { servings: 6 })],
+  );
+  // Ingredients for exactly one serving of a six-serving recipe: the
+  // bisection converges to 0.9999… and the >= 1 cutoff dropped the dish.
+  receive(database, 'flour', { qty: 100, on: '2026-07-01' });
+
+  const check = feasibility(database, 'bun', undefined, '2026-07-02', true);
+  assert.equal(check.servings, 1, `got ${check.servings}`);
+  assert.ok(
+    cookableNow(database, 1, '2026-07-02').some((f) => f.itemId === 'bun'),
+    'cook-now offers the serving that exists',
+  );
+});
+
 test('a parent waits for its cascaded multi-day child to finish', () => {
   const database = db(
     [purchased('flour'), made('starterloaf'), made('feast')],

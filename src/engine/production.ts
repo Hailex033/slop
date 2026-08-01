@@ -348,6 +348,12 @@ function maxFeasibleServings(
     if (ok(mid)) low = mid;
     else high = mid;
   }
+  // The search converges from below, so an exactly-feasible whole count
+  // lands at 0.9999…; snapped to the boundary — when the boundary itself
+  // verifies — "cook one serving" survives the >= 1 cutoff and the UI's
+  // floor instead of vanishing over a rounding hair.
+  const boundary = Math.round(low);
+  if (boundary > low && boundary - low <= 1e-3 && ok(boundary)) return boundary;
   return low;
 }
 

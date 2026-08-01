@@ -306,7 +306,11 @@ export function validate(db: Database): string[] {
             `${item.stockUom} (${dimensionOf(item.stockUom)}), and no density/unit weight bridges them.`,
         );
       }
-      if (packQty <= 0) issues.push(`Item "${item.id}" has a non-positive pack quantity.`);
+      // 1e309 is valid JSON and Infinity in memory: packsFor would round
+      // the shortage to zero packs and the commit would silently skip it.
+      if (!Number.isFinite(packQty) || packQty <= 0) {
+        issues.push(`Item "${item.id}" has an invalid packQty of ${packQty}.`);
+      }
       // `null < 0` is false: an unpriced-by-accident item would coerce to
       // zero in every cost, and shop --commit would snapshot free orders.
       if (!Number.isFinite(packPrice) || packPrice < 0) {

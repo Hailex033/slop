@@ -108,12 +108,21 @@ export function planAllocation(
   itemId: ItemId,
   qty: number,
   asOf?: IsoDate,
+  receivedBy?: IsoDate,
 ): AllocationPlan {
   const allocations: Allocation[] = [];
   let remaining = qty;
   let cost = 0;
 
-  const candidates = asOf === undefined ? lotsOf(db, itemId) : usableLots(db, itemId, asOf);
+  // Usable on the day; or — for stocktakes — everything physically present
+  // by a date, expired included: a count of the shelf sees the mouldy jam
+  // but not the batch still in the oven. With neither bound, everything.
+  const candidates =
+    asOf !== undefined
+      ? usableLots(db, itemId, asOf)
+      : receivedBy !== undefined
+        ? db.lots.filter((lot) => lot.itemId === itemId && lot.qty > 0 && lot.receivedOn <= receivedBy)
+        : lotsOf(db, itemId);
   for (const lot of fefo(candidates)) {
     if (remaining <= 1e-9) break;
     const take = Math.min(lot.qty, remaining);
@@ -236,8 +245,11 @@ export function issue(db: Database, itemId: ItemId, options: IssueOptions): Issu
     throw new MiseError(`Cannot issue ${want} ${item.stockUom} of "${item.name}".`);
   }
 
-  // Cooking on a date can only use what is still good on that date.
-  const plan = planAllocation(db, itemId, want, options.includeExpired ? undefined : on);
+  // Cooking on a date can only use what is still good on that date; a
+  // stocktake reaches the expired too, but never a batch still finishing.
+  const plan = options.includeExpired
+    ? planAllocation(db, itemId, want, undefined, on)
+    : planAllocation(db, itemId, want, on);
   if (plan.shortfall > 1e-9 && !options.allowNegative) {
     throw new ShortageError(itemId, plan.shortfall, item.stockUom);
   }
@@ -299,7 +311,14 @@ export function adjust(
   newQty: number,
   on: IsoDate = today(),
 ): InventoryTxn[] {
-  const delta = newQty - onHand(db, itemId);
+  // A stocktake counts what is on the shelf on the day — expired included,
+  // but not a multi-day batch whose completion lot is dated later: that
+  // food does not exist yet, and an adjustment must neither count it nor
+  // consume it with a transaction dated before its receipt.
+  const present = db.lots
+    .filter((lot) => lot.itemId === itemId && lot.qty > 0 && lot.receivedOn <= on)
+    .reduce((sum, lot) => sum + lot.qty, 0);
+  const delta = newQty - present;
   if (Math.abs(delta) <= 1e-9) return [];
 
   if (delta > 0) {

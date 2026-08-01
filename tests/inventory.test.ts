@@ -19,6 +19,21 @@ import {
 import { nextId } from '../src/domain/ids.js';
 import { close, db, phantom, purchased } from './helpers.js';
 
+test('a stocktake counts the shelf, not the batch still in the oven', () => {
+  const database = db([purchased('flour')]);
+  receive(database, 'flour', { qty: 100, on: '2026-07-01' });
+  // A multi-day making whose completion lot lands later.
+  receive(database, 'flour', { qty: 900, on: '2026-07-05' });
+
+  // Counting 60 on the 2nd adjusts the visible 100 down by 40. The
+  // unfinished 900 is neither counted nor consumed — no adjustment may
+  // predate the lot it destroys.
+  adjust(database, 'flour', 60, '2026-07-02');
+  const future = database.lots.find((lot) => lot.receivedOn === '2026-07-05')!;
+  assert.ok(close(future.qty, 900), 'the finishing batch is untouched');
+  assert.ok(close(onHand(database, 'flour'), 960), `got ${onHand(database, 'flour')}`);
+});
+
 test('unfinished future output is not yet in the pantry', () => {
   const database = db([purchased('flour')]);
   receive(database, 'flour', { qty: 100, on: '2026-07-01', unitCost: 0.01 });

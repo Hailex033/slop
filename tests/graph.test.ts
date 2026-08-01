@@ -128,6 +128,10 @@ test('a negative lead time is an integrity problem', () => {
     purchased('rice2', {
       purchase: { supplierId: 'shop', packQty: 500, packUom: 'g', packPrice: 2, leadTimeDays: 0, moqPacks: 'oops' as never },
     }),
+    // 1e309 is valid JSON and Infinity in memory: zero packs, no order.
+    purchased('bulk9', {
+      purchase: { supplierId: 'shop', packQty: 1e309, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+    }),
   ]);
   database.suppliers.push({ id: 'slowpost', name: 'Slow Post', leadTimeDays: Number.NaN });
 
@@ -137,6 +141,7 @@ test('a negative lead time is an integrity problem', () => {
   // A mangled minimum order reaches pack rounding as NaN and the committed
   // order serialises its pack count as null.
   assert.ok(issues.some((i) => i.includes('invalid moqPacks of oops')));
+  assert.ok(issues.some((i) => i.includes('Item "bulk9" has an invalid packQty of Infinity')));
 });
 
 test('an unpriced-by-accident item is an integrity problem, not free food', () => {
