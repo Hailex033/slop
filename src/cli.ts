@@ -1008,7 +1008,9 @@ const commands: Record<string, Command> = {
       const force = boolFlag(ctx.args, 'force');
       const result = serve(ctx.db, target.itemId, target.servings, {
         allowShortages: force,
-        includeOptional: boolFlag(ctx.args, 'optional'),
+        // Only an explicit flag overrides: a plain serve lets a committed
+        // batch keep the optional policy it was committed with.
+        ...(boolFlag(ctx.args, 'optional') ? { includeOptional: true } : {}),
       });
       ctx.dirty = true;
 

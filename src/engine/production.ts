@@ -493,6 +493,14 @@ export interface ProduceOptions {
    * raised for.
    */
   readonly settleOrders?: boolean;
+  /**
+   * The demand the settlement is on behalf of: meal plan entry ids (a
+   * serve's matched entries, or an executed order's own pegs). An order
+   * pegged to *other* meals is neither swept into the making nor settled —
+   * its batch belongs to the dinners it was committed for. Orders with no
+   * pegs recorded stand for the item generally and always participate.
+   */
+  readonly settlePegs?: readonly string[];
 }
 
 /**
@@ -610,7 +618,7 @@ function produceInner(
         // inputs that were planned, and bought, once. Round the cascade up
         // to the boundary of the last order it touches; the surplus is
         // banked for the siblings the merged run was planned to feed.
-        gap = committedMakeQty(db, child, gap, on);
+        gap = committedMakeQty(db, child, gap, on, options.settlePegs).qty;
       }
       // The child books its own tub whatever frame asked for it: a phantom
       // parent consumes *its* output immediately, but a stocked child under
@@ -627,7 +635,7 @@ function produceInner(
       // while MRP and prep kept counting a commitment already met. An ad-hoc
       // cook is different: its sauce went into *this* dish, not into the
       // future meal the order book is holding, so it settles nothing.
-      if (options.settleOrders === true) settleCommittedOrders(db, child.id, gap);
+      if (options.settleOrders === true) settleCommittedOrders(db, child.id, gap, options.settlePegs);
     }
 
     // `consumeImmediately` decides whether the *output* gets booked into stock.
@@ -739,8 +747,13 @@ export function serve(
   // orders settled — exactly as `receive PRD-x` would. A serve with no plan
   // behind it stays ad-hoc and leaves the order book alone.
   const fulfillingPlan = entries.length > 0;
+  const servedIds = entries.map((entry) => entry.id);
   const result = transactionally(db, () =>
-    serveInner(db, itemId, servings, { settleOrders: fulfillingPlan, ...options }),
+    serveInner(db, itemId, servings, {
+      settleOrders: fulfillingPlan,
+      settlePegs: servedIds,
+      ...options,
+    }),
   );
 
   // Only after the serve has actually happened: what was eaten stops being
@@ -811,13 +824,23 @@ function serveInner(
     // one making, one dose of its fixed inputs — and banks Sunday's half,
     // then closes the order the making has met. Without this, serving each
     // meal cooked the run again and consumed fixed ingredients the plan
-    // bought once.
+    // bought once. Only orders pegged to the meals being served (or pegged
+    // to nothing) participate: a dinner added after the commit must not
+    // eat a batch committed for another meal.
     let make = qty - available;
+    let makeOptions = { ...options, on };
     if (options.settleOrders === true) {
-      make = committedMakeQty(db, mustItem(db, itemId), make, on);
+      const committed = committedMakeQty(db, mustItem(db, itemId), make, on, options.settlePegs);
+      make = committed.qty;
+      // The batch is cooked as it was committed: a plain serve inherits the
+      // order's optional policy exactly as `receive PRD-x` does, and an
+      // explicit choice from the caller still wins.
+      if (options.includeOptional === undefined && committed.includeOptional) {
+        makeOptions = { ...makeOptions, includeOptional: true };
+      }
     }
-    result = produceInner(db, itemId, make, { ...options, on });
-    if (options.settleOrders === true) settleCommittedOrders(db, itemId, make);
+    result = produceInner(db, itemId, make, makeOptions);
+    if (options.settleOrders === true) settleCommittedOrders(db, itemId, make, options.settlePegs);
   }
 
   // The cost of a meal is the cost of the lots it came out of, whether those
@@ -834,21 +857,47 @@ function openOrdersFor(db: Database, itemId: ItemId): ProductionOrder[] {
 }
 
 /**
+ * The open orders a settlement on behalf of `pegs` may touch. An order
+ * pegged to other meals belongs to those dinners — a meal added after the
+ * commit must not eat it. No filter, or an order with no pegs recorded,
+ * means everything participates.
+ */
+function settleableOrders(db: Database, itemId: ItemId, pegs?: readonly string[]): ProductionOrder[] {
+  return openOrdersFor(db, itemId).filter(
+    (order) =>
+      pegs === undefined ||
+      order.pegging === undefined ||
+      order.pegging.length === 0 ||
+      order.pegging.some((peg) => pegs.includes(peg)),
+  );
+}
+
+/**
  * Round an inline making up to the boundary of the open committed orders it
  * touches: the committed run is the making unit, with one dose of every
  * `scalable: false` input, however many meals share it. Perishable orders
  * whose planned start is later than the cook date are left standing — the
  * shelf-life proof behind a merge is anchored at its planned start, and a
- * batch made early may not keep for the meals the proof promised.
+ * batch made early may not keep for the meals the proof promised. Also
+ * reports whether any swept order was committed with its optional
+ * components, so the batch can be cooked as it was committed.
  */
-function committedMakeQty(db: Database, item: Item, gap: number, on: IsoDate): number {
+function committedMakeQty(
+  db: Database,
+  item: Item,
+  gap: number,
+  on: IsoDate,
+  pegs?: readonly string[],
+): { qty: number; includeOptional: boolean } {
   let boundary = 0;
-  for (const order of openOrdersFor(db, item.id)) {
+  let includeOptional = false;
+  for (const order of settleableOrders(db, item.id, pegs)) {
     if (boundary + 1e-9 >= gap) break;
     if (item.shelfLifeDays !== undefined && on < order.startOn) break;
     boundary += order.qty;
+    if (order.includeOptional === true) includeOptional = true;
   }
-  return boundary > gap ? boundary : gap;
+  return { qty: boundary > gap ? boundary : gap, includeOptional };
 }
 
 /**
@@ -868,9 +917,14 @@ function committedMakeQty(db: Database, item: Item, gap: number, on: IsoDate): n
  * reconcile, so the remainder is the only part of the commitment still
  * real.
  */
-function settleCommittedOrders(db: Database, itemId: ItemId, cooked: number): void {
+function settleCommittedOrders(
+  db: Database,
+  itemId: ItemId,
+  cooked: number,
+  pegs?: readonly string[],
+): void {
   let remaining = cooked;
-  for (const order of openOrdersFor(db, itemId)) {
+  for (const order of settleableOrders(db, itemId, pegs)) {
     if (remaining <= 1e-9) break;
     if (remaining + 1e-9 >= order.qty) {
       remaining -= order.qty;
@@ -897,6 +951,9 @@ export function executeOrder(db: Database, orderId: string, options: ProduceOpti
     ...options,
     ref: orderId,
     settleOrders: true,
+    // Child settlements act on behalf of this order's meals: sibling child
+    // orders pegged to other dinners keep their batches.
+    ...(order.pegging ? { settlePegs: order.pegging } : {}),
   });
   order.status = 'received';
   return result;

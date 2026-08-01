@@ -862,6 +862,53 @@ test('serving planned meals one by one still cooks the committed batch once', ()
   assert.ok(close(onHand(database, 'sachet2'), 0), 'one making, one sachet');
 });
 
+test("serving a meal added later leaves other meals' commitments standing", () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-06', slot: 'dinner', itemId: 'dish', servings: 2 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const dishOrder = database.productionOrders.find((o) => o.itemId === 'dish')!;
+  assert.deepEqual([...(dishOrder.pegging ?? [])], ['MP-1']);
+
+  // A dinner added after the commit, due before it. Serving it matches the
+  // item, but not the meals the order was committed for — eating that
+  // batch now would leave Monday's dinner short, on fixed inputs planned
+  // once.
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 2 });
+  const result = serve(database, 'dish', 2, { on: '2026-07-02' });
+
+  assert.equal(result.servedPlanEntryId, 'MP-2');
+  assert.equal(dishOrder.status, 'open', "Monday's batch is not eaten");
+  assert.ok(close(dishOrder.qty, 750), `got ${dishOrder.qty}`);
+  assert.ok(close(onHand(database, 'dish'), 0), 'the ad-hoc making fed only this meal');
+});
+
+test('a plain serve cooks a committed batch with its committed garnish', () => {
+  const database = db(
+    [purchased('polentabase'), purchased('shavings2'), made('bowl')],
+    [
+      recipe('bowl', 1000, [
+        { itemId: 'polentabase', qty: 1000, uom: 'g' },
+        { itemId: 'shavings2', qty: 50, uom: 'g', optional: true },
+      ], { servings: 2 }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'bowl', servings: 2 });
+  receive(database, 'polentabase', { qty: 1000, on: '2026-07-01' });
+  receive(database, 'shavings2', { qty: 50, on: '2026-07-01' });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7, includeOptional: true }));
+
+  // No flag on the serve: the batch is cooked as it was committed — with
+  // the garnish that was planned and bought — exactly as receive PRD-1
+  // would cook it. The order must not be marked received as an optional
+  // batch while the pan got the plain one.
+  serve(database, 'bowl', 2, { on: '2026-07-03' });
+  assert.ok(close(onHand(database, 'shavings2'), 0), 'the committed garnish went into the pan');
+  assert.equal(database.productionOrders[0]!.status, 'received');
+});
+
 test('a stocked sub-recipe under a phantom is banked and issued, not lost', () => {
   const database = db(
     [purchased('chili'), made('paste'), phantom('blend'), made('dish')],
