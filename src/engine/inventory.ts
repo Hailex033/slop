@@ -163,6 +163,12 @@ export function receive(db: Database, itemId: ItemId, options: ReceiveOptions): 
   if (!(qty > 0)) {
     throw new MiseError(`Cannot book ${qty} ${item.stockUom} of "${item.name}" into stock.`);
   }
+  // Zero is a price; negative or NaN is not. Copied through unchecked, a
+  // negative cost turns the pantry valuation — and every dish drawing on
+  // the lot — negative, and NaN serialises to null in the ledger.
+  if (options.unitCost !== undefined && (!Number.isFinite(options.unitCost) || options.unitCost < 0)) {
+    throw new MiseError(`Cannot book "${item.name}" at a unit cost of ${options.unitCost}.`);
+  }
 
   const expiresOn =
     options.expiresOn ?? (item.shelfLifeDays !== undefined ? addDays(on, item.shelfLifeDays) : undefined);

@@ -178,7 +178,7 @@ test('zero servings on the plan is an integrity problem', () => {
   database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'flour', servings: 0 });
 
   const issues = validate(database);
-  assert.ok(issues.some((issue) => issue.includes('non-positive servings')), JSON.stringify(issues));
+  assert.ok(issues.some((issue) => issue.includes('invalid servings')), JSON.stringify(issues));
 });
 
 test('a phantom on the meal plan is an integrity problem', () => {
@@ -235,15 +235,26 @@ test('quantities that are not numbers are integrity problems', () => {
     ],
   );
   database.lots.push({ id: 'LOT-1', itemId: 'flour', qty: 'oops' as never, receivedOn: '2026-07-01' });
+  database.mealPlan.push({
+    id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'bread2', servings: 'oops' as never,
+  });
+  database.recipes[0] = {
+    ...database.recipes[0]!,
+    steps: [{ text: 'rest', activeMin: Number.NaN, passiveMin: -30 }],
+  };
 
   // Every ordered comparison is false for NaN, so all of these passed
-  // doctor while production cooked NaN into the ledger and MRP reported
-  // uncovered meals as covered.
+  // doctor while production cooked NaN into the ledger, MRP reported
+  // uncovered meals as covered, and a NaN-serving dinner simply vanished
+  // from every plan.
   const issues = validate(database);
   assert.ok(issues.some((i) => i.includes('invalid quantity (oops) of "flour"')), JSON.stringify(issues));
   assert.ok(issues.some((i) => i.includes('out-of-range lossPct')));
   assert.ok(issues.some((i) => i.includes('invalid yield of NaN')));
   assert.ok(issues.some((i) => i.includes('Lot "LOT-1" has an invalid quantity (oops)')));
+  assert.ok(issues.some((i) => i.includes('invalid servings of oops')));
+  assert.ok(issues.some((i) => i.includes('invalid activeMin of NaN')));
+  assert.ok(issues.some((i) => i.includes('invalid passiveMin of -30')));
 });
 
 test('order quantities and dates are integrity-checked too', () => {

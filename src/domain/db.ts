@@ -369,6 +369,18 @@ export function validate(db: Database): string[] {
     if (recipe.components.length === 0) {
       issues.push(`Recipe "${recipe.id}" has no components.`);
     }
+    // Step durations feed straight into backward scheduling: a negative
+    // minute starts a long recipe too late, and NaN poisons the dates.
+    for (const step of recipe.steps ?? []) {
+      for (const [field, value] of [
+        ['activeMin', step.activeMin],
+        ['passiveMin', step.passiveMin],
+      ] as const) {
+        if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+          issues.push(`Recipe "${recipe.id}" has a step with an invalid ${field} of ${value}.`);
+        }
+      }
+    }
 
     for (const component of recipe.components) {
       const child = findItem(db, component.itemId);
@@ -426,7 +438,12 @@ export function validate(db: Database): string[] {
           `phantoms are made inline and cannot be served; plan a dish that uses it.`,
       );
     }
-    if (entry.servings <= 0) issues.push(`Meal plan entry "${entry.id}" has non-positive servings.`);
+    // NaN slips the <= comparison, remainingServings turns NaN, and the
+    // demand filter silently drops the meal — dinner vanishes from every
+    // plan while doctor calls the file valid.
+    if (!Number.isFinite(entry.servings) || entry.servings <= 0) {
+      issues.push(`Meal plan entry "${entry.id}" has invalid servings of ${entry.servings}.`);
+    }
     if (!MEAL_SLOTS.includes(entry.slot)) {
       issues.push(`Meal plan entry "${entry.id}" has unknown slot "${entry.slot}".`);
     }

@@ -34,6 +34,17 @@ test('a consumed lot keeps its id reserved in the ledger', () => {
   assert.equal(nextId('MP', [], ['MP-0007']), 'MP-0008');
 });
 
+test('a lot at a nonsense cost is refused, not booked', () => {
+  // Zero is a price; negative turns the pantry valuation — and every dish
+  // drawing on the lot — negative, and NaN serialises to null.
+  const database = db([purchased('flour')]);
+  assert.throws(() => receive(database, 'flour', { qty: 100, on: '2026-07-01', unitCost: -0.5 }), MiseError);
+  assert.throws(() => receive(database, 'flour', { qty: 100, on: '2026-07-01', unitCost: Number.NaN }), MiseError);
+  assert.equal(database.lots.length, 0, 'nothing booked');
+  const free = receive(database, 'flour', { qty: 100, on: '2026-07-01', unitCost: 0 });
+  assert.equal(free.unitCost, 0, 'free is still a price');
+});
+
 test('a lot of nothing is refused, not booked', () => {
   // `stock add flour 0` used to print success while the pantry filtered the
   // zero lot straight back out, leaving only a meaningless ledger receipt.
