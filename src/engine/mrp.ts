@@ -188,6 +188,19 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
   const problems: string[] = [];
   const conflicts: string[] = [];
 
+  // A recipe can reference an item a hand edit has deleted. Each hole is one
+  // problem, however many runs explode through it.
+  const missingReported = new Set<string>();
+  const reportMissing = (recipeName: string, componentId: ItemId): void => {
+    const key = `${recipeName}:${componentId}`;
+    if (missingReported.has(key)) return;
+    missingReported.add(key);
+    problems.push(
+      `Recipe for "${recipeName}" calls for unknown item "${componentId}"; ` +
+        `its demand cannot be planned — fix the data (mise doctor).`,
+    );
+  };
+
   const horizonEnd = addDays(asOf, horizonDays - 1);
 
   for (const itemId of order) {
@@ -238,7 +251,7 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
         0,
       );
       for (const pass of passes) {
-        explodeOneLevel(db, itemId, pass.qty, pass.dueOn, level, pass.sources, addDemand, options.includeOptional);
+        explodeOneLevel(db, itemId, pass.qty, pass.dueOn, level, pass.sources, addDemand, options.includeOptional, reportMissing);
       }
       continue;
     }
@@ -263,7 +276,7 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
     }
     requirements.sort((a, b) => a.dueOn.localeCompare(b.dueOn));
 
-    const allocation = allocate(supplyFor(db, item, firmOrders, options), requirements);
+    const allocation = allocate(supplyFor(db, item, firmOrders, options, asOf), requirements);
     const net = allocation.shortfalls.reduce((sum, short) => sum + short.qty, 0);
     // Shortfalls far enough apart that one order could not cover both become
     // separate orders — buying a week of salad on Monday is not a plan.
@@ -287,7 +300,7 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
     // even though it covers its own parent demand. Skipping this is what would
     // let `mrp --commit` silently empty the shopping list.
     for (const firm of firmOrders) {
-      explodeOneLevel(db, itemId, firm.qty, firm.startOn, level, [firm.id], addDemand, options.includeOptional);
+      explodeOneLevel(db, itemId, firm.qty, firm.startOn, level, [firm.id], addDemand, options.includeOptional, reportMissing);
     }
 
     if (net <= 1e-9) continue;
@@ -344,7 +357,7 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
         });
 
         // Dependent demand, due when production starts rather than when it ends.
-        explodeOneLevel(db, itemId, run.qty, startOn, level, run.sources, addDemand, options.includeOptional);
+        explodeOneLevel(db, itemId, run.qty, startOn, level, run.sources, addDemand, options.includeOptional, reportMissing);
       }
       continue;
     }
@@ -457,6 +470,7 @@ function supplyFor(
   item: Item,
   firmOrders: readonly ProductionOrder[],
   options: MrpOptions,
+  asOf: IsoDate,
 ): SupplyBucket[] {
   const buckets: SupplyBucket[] = [];
 
@@ -504,8 +518,14 @@ function supplyFor(
   }
 
   for (const order of firmOrders) {
-    const until = spoilsOn(order.dueOn);
-    buckets.push({ qty: order.qty, from: order.dueOn, ...(until ? { until } : {}), kind: 'order' });
+    // An overdue order is executed today, not on its historical due date —
+    // the prep schedule already re-dates it — so its output exists from
+    // today and keeps from today. Left on the old dates, a perishable
+    // overdue batch looked spoiled-before-needed and the same quantity was
+    // planned a second time while the order still sat open.
+    const lands = maxDate(asOf, order.dueOn);
+    const until = spoilsOn(lands);
+    buckets.push({ qty: order.qty, from: lands, ...(until ? { until } : {}), kind: 'order' });
   }
 
   // First-expired-first-out, so the carton that is about to turn gets used
@@ -650,6 +670,7 @@ function explodeOneLevel(
   pegging: readonly string[],
   addDemand: (demand: Demand) => void,
   includeOptional = false,
+  onMissing?: (recipeName: string, componentId: ItemId) => void,
 ): void {
   const item = mustItem(db, itemId);
   const recipe = recipeFor(db, itemId);
@@ -661,7 +682,13 @@ function explodeOneLevel(
   for (const component of recipe.components) {
     if (component.optional && !includeOptional) continue;
     const child = findItem(db, component.itemId);
-    if (!child) continue;
+    if (!child) {
+      // Planning around the hole would print a confident shopping list
+      // that is missing an ingredient production will refuse to cook
+      // without. Say so, and keep planning everything else.
+      onMissing?.(item.name, component.itemId);
+      continue;
+    }
 
     const scaled = component.scalable === false ? component.qty : component.qty * batches;
     const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));

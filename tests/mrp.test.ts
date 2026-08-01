@@ -661,6 +661,44 @@ test('an overnight phantom pushes the start of its consumer back', () => {
   assert.equal(run.startOn, '2026-07-02', 'the poolish night is on the schedule');
 });
 
+test('an overdue perishable order is supply for today, not for its past self', () => {
+  const database = db(
+    [purchased('tomato'), made('sauce', { shelfLifeDays: 2 })],
+    [recipe('sauce', 1000, [{ itemId: 'tomato', qty: 500, uom: 'g' }])],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-01', slot: 'dinner', itemId: 'sauce', servings: 1 });
+  commitProduction(database, runMrp(database, { asOf: '2026-06-30', horizonDays: 7 }));
+
+  // The batch was never cooked. Days later another meal wants sauce — the
+  // overdue order, executed today, produces a lot that is fresh for it. On
+  // the historical dates it looked spoiled before it was needed, and the
+  // same kilogram was planned twice.
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-06', slot: 'dinner', itemId: 'sauce', servings: 1 });
+  const result = runMrp(database, { asOf: '2026-07-05', horizonDays: 7 });
+
+  assert.equal(result.production.filter((o) => o.itemId === 'sauce').length, 0, 'the open order covers it');
+});
+
+test('a hole in a recipe is a planning problem, not a silent omission', () => {
+  const database = db(
+    [purchased('flour'), made('bread')],
+    [
+      recipe('bread', 1000, [
+        { itemId: 'flour', qty: 600, uom: 'g' },
+        { itemId: 'ghost', qty: 100, uom: 'g' },
+      ]),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'bread', servings: 1 });
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+
+  // Production will refuse to cook this recipe; the plan must not present a
+  // confident shopping list that quietly lacks an ingredient.
+  assert.ok(result.problems.some((p) => p.includes('ghost')), JSON.stringify(result.problems));
+  assert.ok(result.purchases.some((line) => line.itemId === 'flour'), 'the rest still plans');
+});
+
 test('a committed order straddling the horizon still buys its components', () => {
   const database = db(
     [purchased('flour'), made('bread')],
