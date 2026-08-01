@@ -29,18 +29,19 @@ const TYPES = {
 };
 
 const server = createServer((request, response) => {
-  const url = new URL(request.url ?? '/', `http://${request.headers.host}`);
-
-  // `decodeURIComponent` throws on a malformed escape like `/%ZZ`, and an
-  // exception thrown out of this callback is an uncaught exception on the
-  // event loop — which takes the whole process down. One bad request should
-  // cost the client a 400, not everyone else the server.
+  // Everything derived from the request is parsed inside the guard: a URL
+  // built on `request.headers.host` throws on a hostile Host header (`[`)
+  // *before* any later try could catch it, and an exception out of this
+  // callback is an uncaught exception on the event loop — the whole process
+  // gone. Only the path matters here, so parse against a fixed local base
+  // and let one bad request cost its client a 400, not everyone the server.
   let requested;
   try {
+    const url = new URL(request.url ?? '/', 'http://mise.local');
     requested = url.pathname === '/' ? '/web/index.html' : decodeURIComponent(url.pathname);
   } catch {
     response.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
-    response.end('Bad request: malformed URL escape\n');
+    response.end('Bad request: malformed URL\n');
     return;
   }
 

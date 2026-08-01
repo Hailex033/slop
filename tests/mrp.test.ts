@@ -590,6 +590,22 @@ test('a phantom needed once is still exploded once', () => {
   assert.equal(butter.length, 1);
 });
 
+test('ignoring stock does not ignore commitments already made', () => {
+  const database = nestedDb();
+  planned(database, 'sauce', 1000, '2026-07-03');
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+
+  const rerun = runMrp(database, { asOf: '2026-07-01', horizonDays: 7, ignoreStock: true });
+
+  // The committed batch still supplies the meal — no duplicate sauce run…
+  assert.equal(rerun.production.filter((order) => order.itemId === 'sauce').length, 0);
+  // …and its components are still wanted, from an empty pantry. The helper
+  // recipe serves 1 per 1000 g batch, so 1000 servings is 1000 batches:
+  // 200 kg of roux, of which half is butter.
+  const butter = rerun.purchases.find((line) => line.itemId === 'butter')!;
+  assert.ok(close(butter.qty, 100_000), `got ${butter.qty}`);
+});
+
 test('a buffer that is already short is wanted today, not on the last day', () => {
   const database = nestedDb();
   database.items = database.items.map((item) =>

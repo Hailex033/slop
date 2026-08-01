@@ -14,7 +14,7 @@ import { MiseError, NotFoundError } from '../domain/errors.js';
 import { nextId } from '../domain/ids.js';
 import { convert, type UomCode } from '../domain/units.js';
 import type { Database, ItemId, Lot, PurchaseOrder, SupplierId } from '../domain/types.js';
-import { receive } from './inventory.js';
+import { receive, transactionally } from './inventory.js';
 import type { MrpResult, PlannedPurchase } from './mrp.js';
 import { purchaseUnitCost } from './rollup.js';
 
@@ -293,30 +293,38 @@ export function receivePurchaseOrder(
   const lots: Lot[] = [];
   let cost = 0;
 
-  for (const line of order.lines) {
-    const item = mustItem(db, line.itemId);
-    // What arrives is what was ordered: the pack terms recorded on the line.
-    // The live master is only a fallback for orders saved before lines
-    // carried their own terms.
-    const packQty = line.packQty ?? item.purchase?.packQty;
-    const packUom = line.packUom ?? item.purchase?.packUom;
-    if (packQty === undefined || packUom === undefined) continue;
-    const qty = convert(line.packs * packQty, packUom, item.stockUom, conversionContext(item));
-    if (qty <= 0) continue;
+  // The whole delivery books in as one unit. A later line can still fail —
+  // its item deleted from a hand-edited master, a conversion no longer
+  // bridgeable — and by then earlier lines have already become lots and
+  // ledger entries. Without the boundary the order stays open, so fixing the
+  // data and retrying would receive those earlier lines twice.
+  transactionally(db, () => {
+    for (const line of order.lines) {
+      const item = mustItem(db, line.itemId);
+      // What arrives is what was ordered: the pack terms recorded on the
+      // line. The live master is only a fallback for orders saved before
+      // lines carried their own terms.
+      const packQty = line.packQty ?? item.purchase?.packQty;
+      const packUom = line.packUom ?? item.purchase?.packUom;
+      if (packQty === undefined || packUom === undefined) continue;
+      const qty = convert(line.packs * packQty, packUom, item.stockUom, conversionContext(item));
+      if (qty <= 0) continue;
 
-    const lineCost = line.packs * line.unitPrice;
-    cost += lineCost;
-    lots.push(
-      receive(db, line.itemId, {
-        qty,
-        on,
-        unitCost: lineCost / qty,
-        origin: order.id,
-        note: `received ${line.packs} × ${packQty} ${packUom}`,
-      }),
-    );
-  }
+      const lineCost = line.packs * line.unitPrice;
+      cost += lineCost;
+      lots.push(
+        receive(db, line.itemId, {
+          qty,
+          on,
+          unitCost: lineCost / qty,
+          origin: order.id,
+          note: `received ${line.packs} × ${packQty} ${packUom}`,
+        }),
+      );
+    }
 
-  order.status = 'received';
+    order.status = 'received';
+  });
+
   return { orderId: order.id, lots, cost };
 }

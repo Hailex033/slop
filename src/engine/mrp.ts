@@ -122,7 +122,13 @@ export interface MrpOptions {
   readonly asOf?: IsoDate;
   readonly horizonDays?: number;
   readonly includeOptional?: boolean;
-  /** Ignore what's in the pantry — plan as if starting from empty. */
+  /**
+   * Plan as if the pantry were empty. Commitments are not pantry: firm
+   * production orders and open purchase orders still count as supply and
+   * still demand their components, because they happen whether or not the
+   * shelves are bare — dropping them would plan (and a commit would then
+   * duplicate) work that is already firmly ordered.
+   */
   readonly ignoreStock?: boolean;
   /** Extra demand on top of the meal plan, e.g. an ad-hoc "cook 2 kg of ragù". */
   readonly extraDemand?: readonly Demand[];
@@ -188,8 +194,9 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
     const item = mustItem(db, itemId);
     const demands = demandsByItem.get(itemId) ?? [];
     // Orders already firmed up by a previous run. They are supply for this
-    // item *and* a source of demand for its components — see below.
-    const firmOrders = options.ignoreStock ? [] : firmProductionOrders(db, itemId, horizonEnd);
+    // item *and* a source of demand for its components — and they survive
+    // `ignoreStock`, which empties the pantry, not the order book.
+    const firmOrders = firmProductionOrders(db, itemId, horizonEnd);
 
     // An item can also need attention with nothing planned at all: a buffer
     // that has been eaten into still has to be rebuilt.
@@ -443,20 +450,23 @@ function supplyFor(
   firmOrders: readonly ProductionOrder[],
   options: MrpOptions,
 ): SupplyBucket[] {
-  if (options.ignoreStock) return [];
   const buckets: SupplyBucket[] = [];
 
-  for (const lot of db.lots) {
-    if (lot.itemId !== item.id || lot.qty <= 0) continue;
-    buckets.push({
-      qty: lot.qty,
-      // A lot booked in for a future date has not arrived yet, so it is no more
-      // available today than an open delivery is. Almost every lot is dated in
-      // the past, where this bound is simply inert.
-      from: lot.receivedOn,
-      kind: 'stock',
-      ...(lot.expiresOn ? { until: lot.expiresOn } : {}),
-    });
+  // `ignoreStock` empties the shelves for the what-if; the order book below
+  // is untouched by it, because placed orders arrive either way.
+  if (!options.ignoreStock) {
+    for (const lot of db.lots) {
+      if (lot.itemId !== item.id || lot.qty <= 0) continue;
+      buckets.push({
+        qty: lot.qty,
+        // A lot booked in for a future date has not arrived yet, so it is no
+        // more available today than an open delivery is. Almost every lot is
+        // dated in the past, where this bound is simply inert.
+        from: lot.receivedOn,
+        kind: 'stock',
+        ...(lot.expiresOn ? { until: lot.expiresOn } : {}),
+      });
+    }
   }
 
   // Inbound supply is perishable too. A delivery that lands on Tuesday with a

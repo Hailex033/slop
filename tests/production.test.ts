@@ -110,6 +110,30 @@ test('a pack-size edit after ordering does not change what was ordered', () => {
   assert.ok(close(receipt.lots[0]!.qty, 200), `got ${receipt.lots[0]!.qty}`);
 });
 
+test('a receipt that fails mid-order books nothing at all', () => {
+  const database = nestedDb();
+  database.purchaseOrders.push({
+    id: 'PO-0001',
+    supplierId: 'shop',
+    orderedOn: '2026-07-01',
+    expectedOn: '2026-07-01',
+    status: 'open',
+    lines: [
+      // The butter line is fine; the ghost line throws after it has booked.
+      { itemId: 'butter', packs: 2, packQty: 100, packUom: 'g', unitPrice: 1 },
+      { itemId: 'ghost', packs: 1, packQty: 100, packUom: 'g', unitPrice: 1 },
+    ],
+  });
+  const ledgerBefore = database.ledger.length;
+
+  assert.throws(() => receivePurchaseOrder(database, 'PO-0001', '2026-07-01'));
+
+  assert.equal(onHand(database, 'butter'), 0, 'the butter lot was rolled back with the failure');
+  assert.equal(database.ledger.length, ledgerBefore, 'the ledger records nothing that did not happen');
+  const order = database.purchaseOrders.find((o) => o.id === 'PO-0001')!;
+  assert.equal(order.status, 'open', 'so the order can be corrected and received exactly once');
+});
+
 test('two visits to the same supplier are two trips on the shopping list', () => {
   const database = nestedDb();
   database.items = database.items.map((item) =>

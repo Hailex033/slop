@@ -652,8 +652,11 @@ const commands: Record<string, Command> = {
 
       const from = today();
       const horizon = numberFlag(ctx.args, 'horizon', 14);
+      // Same inclusive window as MRP: a 7-day horizon is today plus six, so
+      // the plan shown here and the plan `mrp`/`shop`/`prep` act on agree
+      // about which entries are in scope.
       const entries = ctx.db.mealPlan
-        .filter((entry) => entry.date >= from && entry.date <= addDays(from, horizon))
+        .filter((entry) => entry.date >= from && entry.date <= addDays(from, horizon - 1))
         .sort((a, b) => a.date.localeCompare(b.date) || a.slot.localeCompare(b.slot));
 
       out(f.heading('Meal plan'));
