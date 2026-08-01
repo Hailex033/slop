@@ -80,8 +80,22 @@ test('a lot of nothing is refused, not booked', () => {
   const database = db([purchased('flour')]);
   assert.throws(() => receive(database, 'flour', { qty: 0, on: '2026-07-01' }), MiseError);
   assert.throws(() => receive(database, 'flour', { qty: -5, on: '2026-07-01' }), MiseError);
+  // A lot of everything is not a lot either: Infinity serialises to null.
+  assert.throws(() => receive(database, 'flour', { qty: Number.POSITIVE_INFINITY, on: '2026-07-01' }), MiseError);
   assert.equal(database.lots.length, 0, 'nothing booked');
   assert.equal(database.ledger.length, 0, 'nothing recorded');
+});
+
+test('food still being made does not show in expiry alerts', () => {
+  const database = db([purchased('milk3', { shelfLifeDays: 2 })]);
+  receive(database, 'milk3', { qty: 500, on: '2026-07-01' });
+  // A multi-day batch executed early books its output at completion —
+  // "use it up first" cannot apply to food that does not exist yet.
+  receive(database, 'milk3', { qty: 500, on: '2026-07-05' });
+
+  const soon = expiring(database, 7, '2026-07-02');
+  assert.equal(soon.length, 1, 'only what is actually in the fridge');
+  assert.equal(soon[0]!.lot.receivedOn, '2026-07-01');
 });
 
 function pantry() {

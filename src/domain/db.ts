@@ -313,6 +313,14 @@ export function validate(db: Database): string[] {
       if (!Number.isFinite(leadTimeDays) || leadTimeDays < 0) {
         issues.push(`Item "${item.id}" has an invalid leadTimeDays of ${leadTimeDays}.`);
       }
+      // A mangled MOQ reaches Math.max in pack rounding as NaN, the commit
+      // guard misses it, and the order serialises its packs as null.
+      if (
+        item.purchase.moqPacks !== undefined &&
+        (!Number.isInteger(item.purchase.moqPacks) || item.purchase.moqPacks < 0)
+      ) {
+        issues.push(`Item "${item.id}" has an invalid moqPacks of ${item.purchase.moqPacks}.`);
+      }
       if (!findSupplier(db, supplierId)) {
         issues.push(`Item "${item.id}" references unknown supplier "${supplierId}".`);
       }
@@ -411,7 +419,13 @@ export function validate(db: Database): string[] {
   // Dates are compared as strings throughout the engine, so a value that is
   // not a real ISO date — "tomorrow", "2026-02-30" — sorts and schedules as
   // nonsense while formatting may show a different calendar day entirely.
+  // Everything looked up or referenced by id must have exactly one owner of
+  // that id: `.find()` only ever reaches the first, leaving its twin
+  // unreachable, and shared ids make ledger origins and pegs ambiguous.
+  const seenLotIds = new Set<string>();
   for (const lot of db.lots) {
+    if (seenLotIds.has(lot.id)) issues.push(`Duplicate lot id "${lot.id}".`);
+    seenLotIds.add(lot.id);
     if (!findItem(db, lot.itemId)) issues.push(`Lot "${lot.id}" references unknown item "${lot.itemId}".`);
     // MRP feeds this straight into Math.min: a NaN quantity silently turns
     // the remaining requirement into NaN, and no shortfall is ever emitted.
@@ -425,7 +439,10 @@ export function validate(db: Database): string[] {
       issues.push(`Lot "${lot.id}" has an invalid expiresOn date "${lot.expiresOn}".`);
     }
   }
+  const seenEntryIds = new Set<string>();
   for (const entry of db.mealPlan) {
+    if (seenEntryIds.has(entry.id)) issues.push(`Duplicate meal plan entry id "${entry.id}".`);
+    seenEntryIds.add(entry.id);
     const planned = findItem(db, entry.itemId);
     if (!planned) {
       issues.push(`Meal plan entry "${entry.id}" references unknown item "${entry.itemId}".`);
@@ -469,7 +486,12 @@ export function validate(db: Database): string[] {
   // The order book holds references too. A deleted item inside an open
   // order makes the receipt throw at mustItem — an order that can never be
   // received, in a database doctor called valid.
+  const seenPoIds = new Set<string>();
   for (const order of db.purchaseOrders) {
+    // receivePurchaseOrder resolves by `.find()`: a duplicate id leaves the
+    // second commitment unreachable and its receipt impossible.
+    if (seenPoIds.has(order.id)) issues.push(`Duplicate purchase order id "${order.id}".`);
+    seenPoIds.add(order.id);
     if (!findSupplier(db, order.supplierId)) {
       issues.push(`Purchase order "${order.id}" references unknown supplier "${order.supplierId}".`);
     }
@@ -504,7 +526,10 @@ export function validate(db: Database): string[] {
       }
     }
   }
+  const seenPrdIds = new Set<string>();
   for (const order of db.productionOrders) {
+    if (seenPrdIds.has(order.id)) issues.push(`Duplicate production order id "${order.id}".`);
+    seenPrdIds.add(order.id);
     const target = findItem(db, order.itemId);
     if (!target) {
       issues.push(`Production order "${order.id}" references unknown item "${order.itemId}".`);

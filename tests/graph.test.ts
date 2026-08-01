@@ -125,12 +125,55 @@ test('a negative lead time is an integrity problem', () => {
     purchased('flour', {
       purchase: { supplierId: 'shop', packQty: 100, packUom: 'g', packPrice: 1, leadTimeDays: -2 },
     }),
+    purchased('rice2', {
+      purchase: { supplierId: 'shop', packQty: 500, packUom: 'g', packPrice: 2, leadTimeDays: 0, moqPacks: 'oops' as never },
+    }),
   ]);
   database.suppliers.push({ id: 'slowpost', name: 'Slow Post', leadTimeDays: Number.NaN });
 
   const issues = validate(database);
   assert.ok(issues.some((i) => i.includes('Item "flour" has an invalid leadTimeDays of -2')), JSON.stringify(issues));
   assert.ok(issues.some((i) => i.includes('Supplier "slowpost" has an invalid leadTimeDays')));
+  // A mangled minimum order reaches pack rounding as NaN and the committed
+  // order serialises its pack count as null.
+  assert.ok(issues.some((i) => i.includes('invalid moqPacks of oops')));
+});
+
+test('duplicate ids anywhere in the book are integrity problems', () => {
+  const database = db(
+    [purchased('flour'), made('loaf9')],
+    [recipe('loaf9', 1000, [{ itemId: 'flour', qty: 600, uom: 'g' }])],
+  );
+  database.lots.push(
+    { id: 'LOT-9', itemId: 'flour', qty: 100, receivedOn: '2026-07-01' },
+    { id: 'LOT-9', itemId: 'flour', qty: 50, receivedOn: '2026-07-02' },
+  );
+  database.mealPlan.push(
+    { id: 'MP-9', date: '2026-07-03', slot: 'dinner', itemId: 'loaf9', servings: 2 },
+    { id: 'MP-9', date: '2026-07-04', slot: 'dinner', itemId: 'loaf9', servings: 2 },
+  );
+  database.purchaseOrders.push(
+    {
+      id: 'PO-9', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
+      lines: [{ itemId: 'flour', packs: 1, unitPrice: 1 }],
+    },
+    {
+      id: 'PO-9', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
+      lines: [{ itemId: 'flour', packs: 1, unitPrice: 1 }],
+    },
+  );
+  database.productionOrders.push(
+    { id: 'PRD-9', itemId: 'loaf9', qty: 100, dueOn: '2026-07-03', startOn: '2026-07-03', status: 'open' },
+    { id: 'PRD-9', itemId: 'loaf9', qty: 100, dueOn: '2026-07-03', startOn: '2026-07-03', status: 'open' },
+  );
+
+  // `.find()` only ever reaches the first of each pair: the twin order is
+  // unreceivable, and shared lot ids make ledger origins ambiguous.
+  const issues = validate(database);
+  assert.ok(issues.some((i) => i.includes('Duplicate lot id "LOT-9"')), JSON.stringify(issues));
+  assert.ok(issues.some((i) => i.includes('Duplicate meal plan entry id "MP-9"')));
+  assert.ok(issues.some((i) => i.includes('Duplicate purchase order id "PO-9"')));
+  assert.ok(issues.some((i) => i.includes('Duplicate production order id "PRD-9"')));
 });
 
 test('a negative conversion coefficient is an integrity problem', () => {
