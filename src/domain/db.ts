@@ -258,6 +258,14 @@ export function validate(db: Database): string[] {
     if (!Number.isFinite(supplier.leadTimeDays) || supplier.leadTimeDays < 0) {
       issues.push(`Supplier "${supplier.id}" has an invalid leadTimeDays of ${supplier.leadTimeDays}.`);
     }
+    // A delivery day outside 0-6 can never match a real weekday: every
+    // requirement from the supplier reports late and no order commits,
+    // even though an ordinary shopping day was intended.
+    for (const day of supplier.deliveryDays ?? []) {
+      if (!Number.isInteger(day) || day < 0 || day > 6) {
+        issues.push(`Supplier "${supplier.id}" has an invalid delivery day ${day} (weekdays are 0-6).`);
+      }
+    }
   }
 
   const seenItemIds = new Set<ItemId>();
@@ -493,6 +501,20 @@ export function validate(db: Database): string[] {
         `Meal plan entry "${entry.id}" has an invalid servedServings of ` +
           `${entry.servedServings} (servings: ${entry.servings}).`,
       );
+    }
+    if (entry.servedOn !== undefined) {
+      // Any truthy servedOn reads as "fully served" on legacy entries, so a
+      // malformed one silently retires the dinner from every plan.
+      if (!isIsoDate(entry.servedOn)) {
+        issues.push(`Meal plan entry "${entry.id}" has an invalid servedOn date "${entry.servedOn}".`);
+      } else if (entry.servedServings !== undefined && entry.servedServings < entry.servings - 1e-9) {
+        // servedOn is the completion marker: paired with a partial count,
+        // the plan display hides an entry MRP still plans the rest of.
+        issues.push(
+          `Meal plan entry "${entry.id}" is marked served on ${entry.servedOn} but only ` +
+            `${entry.servedServings} of ${entry.servings} servings are recorded eaten.`,
+        );
+      }
     }
   }
 

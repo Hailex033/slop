@@ -134,10 +134,13 @@ test('a negative lead time is an integrity problem', () => {
     }),
   ]);
   database.suppliers.push({ id: 'slowpost', name: 'Slow Post', leadTimeDays: Number.NaN });
+  // Day 7 exists in no week: every trip would report late forever.
+  database.suppliers.push({ id: 'oddshop', name: 'Odd Shop', leadTimeDays: 0, deliveryDays: [7] });
 
   const issues = validate(database);
   assert.ok(issues.some((i) => i.includes('Item "flour" has an invalid leadTimeDays of -2')), JSON.stringify(issues));
   assert.ok(issues.some((i) => i.includes('Supplier "slowpost" has an invalid leadTimeDays')));
+  assert.ok(issues.some((i) => i.includes('Supplier "oddshop" has an invalid delivery day 7')));
   // A mangled minimum order reaches pack rounding as NaN and the committed
   // order serialises its pack count as null.
   assert.ok(issues.some((i) => i.includes('invalid moqPacks of oops')));
@@ -225,9 +228,20 @@ test('impossible served counts and orphaned orders are integrity problems', () =
     id: 'PRD-1', itemId: 'vanished', qty: 100, dueOn: '2026-07-03', startOn: '2026-07-03', status: 'open',
   });
 
+  database.mealPlan.push({
+    id: 'MP-3', date: '2026-07-05', slot: 'dinner', itemId: 'flour', servings: 4, servedOn: 'tomorrow' as never,
+  });
+  database.mealPlan.push({
+    id: 'MP-4', date: '2026-07-06', slot: 'dinner', itemId: 'flour', servings: 4, servedServings: 2, servedOn: '2026-07-06',
+  });
+
   const issues = validate(database);
   assert.ok(issues.some((i) => i.includes('invalid servedServings of -2')), JSON.stringify(issues));
   assert.ok(issues.some((i) => i.includes('invalid servedServings of 9')));
+  // A truthy garbage marker silently retires the dinner; a completion
+  // marker on a half-eaten entry hides demand MRP still plans.
+  assert.ok(issues.some((i) => i.includes('invalid servedOn date "tomorrow"')));
+  assert.ok(issues.some((i) => i.includes('marked served on 2026-07-06 but only 2 of 4')));
   assert.ok(issues.some((i) => i.includes('unknown supplier "nobody"')));
   assert.ok(issues.some((i) => i.includes('line for unknown item "ghost"')));
   assert.ok(issues.some((i) => i.includes('Production order "PRD-1" references unknown item')));
