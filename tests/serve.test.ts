@@ -73,6 +73,28 @@ test('paths outside the repository are refused', async () => {
   }
 });
 
+test('only the public asset trees are served, not the whole repository', async () => {
+  // Every one of these exists on disk under the root; that is exactly why
+  // they must be refused — the root also holds the CLI database, the git
+  // history, and the source.
+  for (const path of [
+    '/package.json',
+    '/README.md',
+    '/.git/config',
+    '/scripts/serve.mjs',
+    // fetch() would collapse a literal `..` before sending; the encoded form
+    // reaches the server intact, which is the case the allowlist must catch.
+    '/web/%2e%2e/package.json',
+  ]) {
+    const response = await fetch(`${BASE}${path}`);
+    assert.equal(response.status, 404, `${path} must not be downloadable`);
+  }
+
+  // And the page still works: both public trees answer.
+  assert.equal((await fetch(`${BASE}/web/styles.css`)).status, 200);
+  assert.equal((await fetch(`${BASE}/dist/web/app.js`)).status, 200);
+});
+
 test('an unknown path is a 404 and the server carries on', async () => {
   assert.equal((await fetch(`${BASE}/nope/missing.js`)).status, 404);
   assert.equal((await fetch(`${BASE}/`)).status, 200);

@@ -204,6 +204,15 @@ export interface PurchaseOrderLine {
   readonly itemId: ItemId;
   /** Number of packs, not loose quantity — you buy bags, not grams. */
   readonly packs: number;
+  /**
+   * The pack size as it stood when the order was raised. An order is a record
+   * of a commitment, not a view over the live item master: editing an item's
+   * pack from 100 g to 250 g must not retroactively turn a one-pack order into
+   * a 250 g receipt. Optional only for orders saved before this was recorded —
+   * readers fall back to the current master for those.
+   */
+  readonly packQty?: number;
+  readonly packUom?: UomCode;
   readonly unitPrice: number;
 }
 

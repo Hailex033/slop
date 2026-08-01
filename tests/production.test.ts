@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
-import { onHand, receive } from '../src/engine/inventory.js';
+import { onHand, onOrder, receive } from '../src/engine/inventory.js';
 import { runMrp } from '../src/engine/mrp.js';
-import { packsFor, raisePurchaseOrders, shoppingList } from '../src/engine/procurement.js';
+import { packsFor, raisePurchaseOrders, receivePurchaseOrder, shoppingList } from '../src/engine/procurement.js';
 import { cookableNow, feasibility, prepSchedule, produce, serve } from '../src/engine/production.js';
 import { MiseError, ShortageError } from '../src/domain/errors.js';
 import { close, db, made, nestedDb, purchased, recipe } from './helpers.js';
@@ -80,6 +80,34 @@ test('a purchase order is stamped for the day the shop is actually open', () => 
   const after = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
   assert.equal(after.lines.find((line) => line.itemId === 'cheese')!.onOrder, 0);
   assert.equal(after.conflicts.length, 1);
+});
+
+test('a pack-size edit after ordering does not change what was ordered', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'cheese', servings: 200 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const [order] = raisePurchaseOrders(database, shoppingList(database, mrp), '2026-07-01');
+  assert.ok(order);
+  assert.equal(order.lines[0]!.packs, 2, 'two 100 g packs cover 200 g');
+
+  // The shop rebrands: cheese now comes in 250 g packs at a new price. The
+  // order in flight was for two 100 g packs and must stay two 100 g packs.
+  database.items = database.items.map((item) =>
+    item.id === 'cheese'
+      ? { ...item, purchase: { ...item.purchase!, packQty: 250, packPrice: 2.4 } }
+      : item,
+  );
+
+  // Planning still counts the inbound at the ordered size, on both paths...
+  const after = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(close(after.lines.find((line) => line.itemId === 'cheese')!.onOrder, 200));
+  assert.ok(close(onOrder(database, 'cheese', '2026-07-07'), 200));
+
+  // ...and the receipt books in what was committed to, not the new pack.
+  const receipt = receivePurchaseOrder(database, order.id, '2026-07-02');
+  assert.equal(receipt.lots.length, 1);
+  assert.ok(close(receipt.lots[0]!.qty, 200), `got ${receipt.lots[0]!.qty}`);
 });
 
 test('one purchase order per trip, not per supplier', () => {

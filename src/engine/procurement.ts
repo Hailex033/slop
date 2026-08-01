@@ -37,7 +37,7 @@ export interface ShoppingLine {
   readonly supplierId?: SupplierId;
   readonly supplierName?: string;
   readonly orderBy: IsoDate;
-  /** True when the earliest possible trip lands after the food is needed. */
+  /** True when no trip works: too late for the meal, or too early to keep. */
   readonly late: boolean;
   /** What this is for, in plain language: "ragù, béchamel". */
   readonly forDishes: readonly string[];
@@ -221,11 +221,18 @@ export function raisePurchaseOrders(
       orderedOn,
       expectedOn: addDays(orderedOn, trip.leadTimeDays),
       status: 'open',
-      lines: trip.lines.map((line) => ({
-        itemId: line.itemId,
-        packs: line.packs,
-        unitPrice: mustItem(db, line.itemId).purchase?.packPrice ?? 0,
-      })),
+      lines: trip.lines.map((line) => {
+        // Snapshot the pack terms alongside the price. The receipt and later
+        // MRP runs read these, not the live master, so editing an item's pack
+        // size cannot quietly change what this order will deliver.
+        const purchase = mustItem(db, line.itemId).purchase;
+        return {
+          itemId: line.itemId,
+          packs: line.packs,
+          ...(purchase ? { packQty: purchase.packQty, packUom: purchase.packUom } : {}),
+          unitPrice: purchase?.packPrice ?? 0,
+        };
+      }),
     };
     created.push(order);
     db.purchaseOrders.push(order);
@@ -274,13 +281,13 @@ export function receivePurchaseOrder(
 
   for (const line of order.lines) {
     const item = mustItem(db, line.itemId);
-    if (!item.purchase) continue;
-    const qty = convert(
-      line.packs * item.purchase.packQty,
-      item.purchase.packUom,
-      item.stockUom,
-      conversionContext(item),
-    );
+    // What arrives is what was ordered: the pack terms recorded on the line.
+    // The live master is only a fallback for orders saved before lines
+    // carried their own terms.
+    const packQty = line.packQty ?? item.purchase?.packQty;
+    const packUom = line.packUom ?? item.purchase?.packUom;
+    if (packQty === undefined || packUom === undefined) continue;
+    const qty = convert(line.packs * packQty, packUom, item.stockUom, conversionContext(item));
     if (qty <= 0) continue;
 
     const lineCost = line.packs * line.unitPrice;
@@ -291,7 +298,7 @@ export function receivePurchaseOrder(
         on,
         unitCost: lineCost / qty,
         origin: order.id,
-        note: `received ${line.packs} × ${item.purchase.packQty} ${item.purchase.packUom}`,
+        note: `received ${line.packs} × ${packQty} ${packUom}`,
       }),
     );
   }

@@ -56,7 +56,10 @@ export interface PlannedPurchase {
   readonly neededOn: IsoDate;
   /** Latest date you can buy it and still have it in time. */
   readonly orderBy: IsoDate;
-  /** True when even the earliest possible trip lands after it is needed. */
+  /**
+   * True when no reachable trip works: the earliest lands after the food is
+   * needed, or the only ones early enough land food that spoils before then.
+   */
   readonly late: boolean;
   readonly supplierId?: string;
   /** Demands this order covers, for pegging. */
@@ -335,8 +338,12 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       if (trip.late) {
         const supplier = item.purchase ? findSupplier(db, item.purchase.supplierId) : undefined;
         conflicts.push(
-          `${item.name} is needed ${run.dueOn}, but ${supplier?.name ?? 'the supplier'} cannot supply ` +
-            `it in time — the earliest trip is ${trip.orderBy}.`,
+          trip.spoils
+            ? `${item.name} is needed ${run.dueOn}, but the nearest ${supplier?.name ?? 'supplier'} ` +
+                `trip is ${trip.orderBy} and it only keeps ${item.shelfLifeDays} days — it would ` +
+                `spoil before it is wanted.`
+            : `${item.name} is needed ${run.dueOn}, but ${supplier?.name ?? 'the supplier'} cannot supply ` +
+                `it in time — the earliest trip is ${trip.orderBy}.`,
         );
       }
       purchases.push({
@@ -454,15 +461,16 @@ function supplyFor(
   for (const order of db.purchaseOrders) {
     if (order.status !== 'open') continue;
     for (const line of order.lines) {
-      if (line.itemId !== item.id || !item.purchase) continue;
+      if (line.itemId !== item.id) continue;
+      // Inbound quantity comes from the terms recorded on the order, exactly
+      // as the receipt will book it in — the live master is only a fallback
+      // for orders saved before lines carried their own pack terms.
+      const packQty = line.packQty ?? item.purchase?.packQty;
+      const packUom = line.packUom ?? item.purchase?.packUom;
+      if (packQty === undefined || packUom === undefined) continue;
       const until = spoilsOn(order.expectedOn);
       buckets.push({
-        qty: convert(
-          line.packs * item.purchase.packQty,
-          item.purchase.packUom,
-          item.stockUom,
-          conversionContext(item),
-        ),
+        qty: convert(line.packs * packQty, packUom, item.stockUom, conversionContext(item)),
         from: order.expectedOn,
         ...(until ? { until } : {}),
         kind: 'order',
@@ -538,26 +546,39 @@ function allocate(buckets: SupplyBucket[], requirements: readonly Demand[]): All
  * Lead time sets the latest useful day; the supplier's opening days decide
  * which of the days before it you can actually go. A Saturday market cannot
  * supply Friday's dinner however early you plan, and saying so is more useful
- * than quietly printing an impossible date.
+ * than quietly printing an impossible date. The constraint cuts both ways:
+ * a trip can also be too *early* — salad bought at Wednesday's market is
+ * compost by Saturday's dinner — so an open day only counts if the food
+ * would still be good when it is wanted.
  */
 function schedulePurchase(
   db: Database,
   item: Item,
   neededOn: IsoDate,
   asOf: IsoDate,
-): { orderBy: IsoDate; late: boolean } {
+): { orderBy: IsoDate; late: boolean; spoils?: boolean } {
   const leadTime = item.purchase?.leadTimeDays ?? 0;
   const latest = addDays(neededOn, -leadTime);
   const supplier = item.purchase ? findSupplier(db, item.purchase.supplierId) : undefined;
   const openOn = supplier?.deliveryDays;
 
   if (!openOn || openOn.length === 0) {
+    // Unconstrained suppliers are visited as late as possible, so the arrival
+    // is never earlier than the need and freshness cannot be the problem.
     return { orderBy: maxDate(asOf, latest), late: latest < asOf };
   }
 
+  const keepsUntilNeeded = (tripDay: IsoDate): boolean =>
+    item.shelfLifeDays === undefined ||
+    daysBetween(addDays(tripDay, leadTime), neededOn) <= item.shelfLifeDays;
+
   // Walk back from the last useful day to today, looking for an open day.
   for (let date = latest; date >= asOf; date = addDays(date, -1)) {
-    if (openOn.includes(weekdayIndex(date))) return { orderBy: date, late: false };
+    if (!openOn.includes(weekdayIndex(date))) continue;
+    if (keepsUntilNeeded(date)) return { orderBy: date, late: false };
+    // Walking further back only lands the food earlier and staler. This open
+    // day is the best real option; commit to it, but say what it costs.
+    return { orderBy: date, late: true, spoils: true };
   }
 
   // Nothing in the window: report the first opening after it, so the plan shows

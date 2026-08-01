@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * A static file server with no dependencies, so `npm run web` works offline.
- * Serves the repository root: `web/` for the page, `dist/` for the engine that
+ * Serves exactly two trees: `web/` for the page, `dist/` for the engine that
  * the page imports as plain ES modules.
  */
 
@@ -11,6 +11,11 @@ import { extname, join, normalize, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const PORT = Number(process.env.PORT ?? 4173);
+
+// Only the public asset trees are served. The repository root also holds the
+// CLI database (household names, meal plans, pantry), `.git/`, and source —
+// none of which should be downloadable by whoever else is on the network.
+const PUBLIC = ['/web/', '/dist/'];
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -39,8 +44,17 @@ const server = createServer((request, response) => {
     return;
   }
 
+  // Normalise *before* the allowlist check, so `/web/../mise.db.json` is
+  // judged as the `/mise.db.json` it resolves to, not by its prefix.
+  const clean = normalize(requested);
+  if (!PUBLIC.some((prefix) => clean.startsWith(prefix))) {
+    response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end(`Not found: ${requested}\n`);
+    return;
+  }
+
   // Contain everything under the repository root.
-  const target = resolve(ROOT, `.${normalize(requested)}`);
+  const target = resolve(ROOT, `.${clean}`);
   if (!target.startsWith(ROOT) || !existsSync(target) || statSync(target).isDirectory()) {
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
     response.end(`Not found: ${requested}\n`);

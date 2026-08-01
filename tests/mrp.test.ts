@@ -262,6 +262,42 @@ test('an unreachable shopping day is reported as a conflict, not hidden', () => 
   assert.deepEqual(result.problems, [], 'a shop being shut is not a data error');
 });
 
+test('a trip early enough to make is refused when the food would not keep', () => {
+  const database = nestedDb();
+  database.suppliers = [{ id: 'shop', name: 'Saturday market', leadTimeDays: 0, deliveryDays: [6] }];
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, shelfLifeDays: 2 } : item,
+  );
+  // Needed Friday the 17th. The Saturday before is the 11th — reachable, but
+  // cheese bought then is six days old by Friday and only keeps two.
+  planned(database, 'cheese', 200, '2026-07-17');
+
+  const result = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
+  const cheese = result.purchases.find((line) => line.itemId === 'cheese')!;
+
+  assert.equal(cheese.orderBy, '2026-07-11', 'the nearest real trip is still named');
+  assert.equal(cheese.late, true, 'but it is flagged, not marked timely');
+  assert.equal(result.conflicts.length, 1);
+  assert.match(result.conflicts[0]!, /spoil/);
+  assert.deepEqual(result.problems, [], 'freshness is a plan conflict, not a data error');
+});
+
+test('the same trip is fine when the shelf life covers the gap', () => {
+  const database = nestedDb();
+  database.suppliers = [{ id: 'shop', name: 'Saturday market', leadTimeDays: 0, deliveryDays: [6] }];
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, shelfLifeDays: 10 } : item,
+  );
+  planned(database, 'cheese', 200, '2026-07-17');
+
+  const result = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
+  const cheese = result.purchases.find((line) => line.itemId === 'cheese')!;
+
+  assert.equal(cheese.orderBy, '2026-07-11');
+  assert.equal(cheese.late, false);
+  assert.deepEqual(result.conflicts, []);
+});
+
 test('an expiring lot covers the meal before it, not the one after', () => {
   const database = nestedDb();
   planned(database, 'cheese', 200, '2026-07-02');

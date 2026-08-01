@@ -318,13 +318,13 @@ export function onOrder(db: Database, itemId: ItemId, by: IsoDate): number {
     for (const line of order.lines) {
       if (line.itemId !== itemId) continue;
       const item = mustItem(db, itemId);
-      if (!item.purchase) continue;
-      total += convert(
-        line.packs * item.purchase.packQty,
-        item.purchase.packUom,
-        item.stockUom,
-        conversionContext(item),
-      );
+      // The terms recorded on the line, not the live master — same rule as
+      // the receipt and MRP's inbound supply, so all three agree on what a
+      // pack-size edit does (nothing) to an already-raised order.
+      const packQty = line.packQty ?? item.purchase?.packQty;
+      const packUom = line.packUom ?? item.purchase?.packUom;
+      if (packQty === undefined || packUom === undefined) continue;
+      total += convert(line.packs * packQty, packUom, item.stockUom, conversionContext(item));
     }
   }
   return total;
