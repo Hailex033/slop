@@ -718,13 +718,14 @@ const commands: Record<string, Command> = {
   },
 
   mrp: {
-    usage: 'mise mrp [--horizon N] [--ignore-stock] [--commit]',
+    usage: 'mise mrp [--horizon N] [--ignore-stock] [--optional] [--commit]',
     summary: 'Net the plan against the pantry and work out what must happen.',
     group: 'planning',
     run: (ctx) => {
       const result = runMrp(ctx.db, {
         horizonDays: numberFlag(ctx.args, 'horizon', ctx.db.settings.planningHorizonDays),
         ignoreStock: boolFlag(ctx.args, 'ignore-stock'),
+        includeOptional: boolFlag(ctx.args, 'optional'),
       });
 
       out(f.heading(`Requirements plan — ${result.horizonDays} days from ${formatDate(result.asOf)}`));
@@ -770,12 +771,13 @@ const commands: Record<string, Command> = {
   },
 
   shop: {
-    usage: 'mise shop [--horizon N] [--commit]',
+    usage: 'mise shop [--horizon N] [--optional] [--commit]',
     summary: 'The shopping list: net requirements rounded to what shops actually sell.',
     group: 'planning',
     run: (ctx) => {
       const mrp = runMrp(ctx.db, {
         horizonDays: numberFlag(ctx.args, 'horizon', ctx.db.settings.planningHorizonDays),
+        includeOptional: boolFlag(ctx.args, 'optional'),
       });
       const list = shoppingList(ctx.db, mrp);
       const currency = ctx.db.settings.currency;
@@ -821,12 +823,13 @@ const commands: Record<string, Command> = {
   },
 
   prep: {
-    usage: 'mise prep [--horizon N]',
+    usage: 'mise prep [--horizon N] [--optional]',
     summary: 'Day-by-day prep schedule, deepest sub-recipe first.',
     group: 'planning',
     run: (ctx) => {
       const mrp = runMrp(ctx.db, {
         horizonDays: numberFlag(ctx.args, 'horizon', ctx.db.settings.planningHorizonDays),
+        includeOptional: boolFlag(ctx.args, 'optional'),
       });
       const days = prepSchedule(ctx.db, mrp);
 

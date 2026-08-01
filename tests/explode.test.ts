@@ -220,6 +220,26 @@ test('a zero requirement expands to nothing, fixed components included', () => {
   assert.deepEqual(aggregate(tree, { level: 'leaves' }), []);
 });
 
+test('a valid chain deeper than any arbitrary ceiling still reaches its leaves', () => {
+  const items = [purchased('leaf')];
+  const recipes = [];
+  let prev = 'leaf';
+  for (let i = 0; i < 20; i += 1) {
+    const id = `level-${i}`;
+    items.push(made(id));
+    recipes.push(recipe(id, 100, [{ itemId: prev, qty: 100, uom: 'g' }]));
+    prev = id;
+  }
+  const database = db(items, recipes);
+
+  const nodes = flatten(explode(database, { itemId: 'level-19', qty: 100, uom: 'g' }));
+  const leaf = nodes.find((node) => node.itemId === 'leaf');
+
+  assert.ok(leaf, 'the purchased leaf at depth 20 is reached');
+  assert.equal(leaf.depth, 20);
+  assert.ok(!nodes.some((node) => node.stopped), 'nothing was silently truncated');
+});
+
 test('a negative requirement is refused', () => {
   const database = nestedDb();
   assert.throws(() => explode(database, { itemId: 'dish', qty: -100, uom: 'g' }), MiseError);

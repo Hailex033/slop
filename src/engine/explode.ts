@@ -57,7 +57,13 @@ export interface BomNode {
 export interface ExplodeOptions {
   /** Include components marked `optional`. Default false. */
   readonly includeOptional?: boolean;
-  /** Safety valve for pathological data. Default 16. */
+  /**
+   * Truncate expansion below this depth, marking the node `stopped`.
+   * Unbounded by default: cycles are refused by the walk itself, so a valid
+   * chain deeper than any arbitrary ceiling still reaches its purchased
+   * leaves — a silent cap at 16 quietly turned deep sub-recipes into leaves
+   * and dropped their ingredients from the shopping list.
+   */
   readonly maxDepth?: number;
   /** Items to treat as leaves — "I'll buy the pasta sheets rather than make them". */
   readonly stopAt?: ReadonlySet<ItemId>;
@@ -106,7 +112,7 @@ export function servingsForQuantity(db: Database, itemId: ItemId, qty: number, u
  * actually walked — cheap insurance even though `mise doctor` checks globally.
  */
 export function explode(db: Database, request: ExplodeRequest): BomNode {
-  const { itemId, includeOptional = false, maxDepth = 16, stopAt } = request;
+  const { itemId, includeOptional = false, maxDepth = Number.POSITIVE_INFINITY, stopAt } = request;
   const rootItem = mustItem(db, itemId);
   if ((request.qty ?? 0) < 0 || (request.servings ?? 0) < 0) {
     throw new MiseError(`Cannot explode a negative quantity of "${rootItem.name}".`);

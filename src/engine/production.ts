@@ -674,6 +674,23 @@ function serveInner(
       shortages: [],
       minutes: 0,
     };
+  } else if (!recipeFor(db, itemId) && options.allowShortages === true) {
+    // A purchased, ready-to-eat item that is short cannot be cooked into
+    // existence. With shortages allowed, the serve itself is the record: the
+    // forced issue below consumes what is there and posts the gap to the
+    // ledger, instead of produceInner refusing for want of a recipe.
+    const item = mustItem(db, itemId);
+    result = {
+      itemId,
+      name: item.name,
+      qty,
+      uom: item.stockUom,
+      servings,
+      cost: 0,
+      consumed: [],
+      shortages: [{ itemId, name: item.name, short: qty - available, uom: item.stockUom }],
+      minutes: 0,
+    };
   } else {
     result = produceInner(db, itemId, qty - available, { ...options, on });
   }

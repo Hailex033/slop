@@ -153,6 +153,23 @@ test('an unresolved line is never committed into an order', () => {
   );
 });
 
+test('a forced serve of a purchased item records the gap instead of refusing', () => {
+  const database = db([purchased('bread', { shelfLifeDays: 4 })]);
+  receive(database, 'bread', { qty: 100, on: '2026-07-01' });
+
+  // Without --force the honest refusal stands: there is no recipe to run.
+  assert.throws(() => serve(database, 'bread', 250, { on: '2026-07-02' }), /can only be bought/);
+
+  const result = serve(database, 'bread', 250, { on: '2026-07-02', allowShortages: true });
+  assert.ok(result.shortages.some((s) => s.itemId === 'bread' && close(s.short, 150)));
+
+  // The ledger accounts for the whole serving, overrun included.
+  const consumed = database.ledger
+    .filter((txn) => txn.type === 'issue')
+    .reduce((sum, txn) => sum + txn.qty, 0);
+  assert.ok(close(consumed, -250), `ledger accounts for ${consumed}`);
+});
+
 test('a recipe hole makes a dish infeasible, not unlimited', () => {
   const database = nestedDb();
   database.items = database.items.filter((item) => item.id !== 'cheese');
