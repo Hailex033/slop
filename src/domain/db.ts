@@ -307,7 +307,11 @@ export function validate(db: Database): string[] {
         );
       }
       if (packQty <= 0) issues.push(`Item "${item.id}" has a non-positive pack quantity.`);
-      if (packPrice < 0) issues.push(`Item "${item.id}" has a negative pack price.`);
+      // `null < 0` is false: an unpriced-by-accident item would coerce to
+      // zero in every cost, and shop --commit would snapshot free orders.
+      if (!Number.isFinite(packPrice) || packPrice < 0) {
+        issues.push(`Item "${item.id}" has an invalid packPrice of ${packPrice}.`);
+      }
       // A negative lead time schedules the shop *after* the food is needed,
       // and the committed order arrives before it was placed.
       if (!Number.isFinite(leadTimeDays) || leadTimeDays < 0) {

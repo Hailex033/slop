@@ -139,6 +139,19 @@ test('a negative lead time is an integrity problem', () => {
   assert.ok(issues.some((i) => i.includes('invalid moqPacks of oops')));
 });
 
+test('an unpriced-by-accident item is an integrity problem, not free food', () => {
+  // `null < 0` is false: doctor approved it while every cost coerced the
+  // price to zero and shop --commit snapshotted free orders.
+  const database = db([
+    purchased('mystery2', {
+      purchase: { supplierId: 'shop', packQty: 100, packUom: 'g', packPrice: null as never, leadTimeDays: 0 },
+    }),
+  ]);
+
+  const issues = validate(database);
+  assert.ok(issues.some((i) => i.includes('invalid packPrice of null')), JSON.stringify(issues));
+});
+
 test('duplicate ids anywhere in the book are integrity problems', () => {
   const database = db(
     [purchased('flour'), made('loaf9')],

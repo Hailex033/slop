@@ -628,7 +628,7 @@ function produceInner(
         // inputs that were planned, and bought, once. Round the cascade up
         // to the boundary of the last order it touches; the surplus is
         // banked for the siblings the merged run was planned to feed.
-        gap = committedMakeQty(db, child, gap, on, options.settlePegs).qty;
+        gap = committedMakeQty(db, child, gap, on, options.settlePegs);
       }
       // The child books its own tub whatever frame asked for it: a phantom
       // parent consumes *its* output immediately, but a stocked child under
@@ -839,28 +839,64 @@ function serveInner(
       minutes: 0,
     };
   } else {
-    // The dish's own committed batch is the making unit here too: serving
-    // Friday's half of a merged two-dinner order cooks the whole batch —
-    // one making, one dose of its fixed inputs — and banks Sunday's half,
-    // then closes the order the making has met. Without this, serving each
-    // meal cooked the run again and consumed fixed ingredients the plan
-    // bought once. Only orders pegged to the meals being served (or pegged
-    // to nothing) participate: a dinner added after the commit must not
-    // eat a batch committed for another meal.
-    let make = qty - available;
-    let makeOptions = { ...options, on };
+    // The dish's own committed batches are the making units here too:
+    // serving Friday's half of a merged two-dinner order cooks the whole
+    // batch — one making, one dose of its fixed inputs — banks Sunday's
+    // half, and closes the order the making has met. And a batch committed
+    // with its garnish next to one committed without is two different
+    // dishes: two pots, two policies — never one union pot cooking plain
+    // quantities with garnish nobody bought. Each committed making keeps
+    // the policy it was committed with (an explicit caller flag still
+    // wins, as with `receive PRD-x`), settles as it is met, and any
+    // uncommitted remainder cooks under the caller's own policy. Only
+    // orders pegged to the meals being served (or pegged to nothing)
+    // participate: a dinner added after the commit must not eat a batch
+    // committed for another meal.
+    let remaining = qty - available;
+    const makings: { qty: number; includeOptional: boolean }[] = [];
     if (options.settleOrders === true) {
-      const committed = committedMakeQty(db, mustItem(db, itemId), make, on, options.settlePegs);
-      make = committed.qty;
-      // The batch is cooked as it was committed: a plain serve inherits the
-      // order's optional policy exactly as `receive PRD-x` does, and an
-      // explicit choice from the caller still wins.
-      if (options.includeOptional === undefined && committed.includeOptional) {
-        makeOptions = { ...makeOptions, includeOptional: true };
+      const item = mustItem(db, itemId);
+      for (const order of settleableOrders(db, itemId, options.settlePegs)) {
+        if (remaining <= 1e-9) break;
+        // Perishables committed for later keep to their planned start —
+        // the same early-execution gate the cascade applies.
+        if (item.shelfLifeDays !== undefined && on < order.startOn) break;
+        const policy = options.includeOptional ?? (order.includeOptional === true);
+        const last = makings[makings.length - 1];
+        if (last && last.includeOptional === policy) last.qty += order.qty;
+        else makings.push({ qty: order.qty, includeOptional: policy });
+        remaining -= order.qty;
       }
     }
-    result = produceInner(db, itemId, make, makeOptions);
-    if (options.settleOrders === true) settleCommittedOrders(db, itemId, make, options.settlePegs);
+    if (remaining > 1e-9) {
+      const policy = options.includeOptional ?? false;
+      const last = makings[makings.length - 1];
+      if (last && last.includeOptional === policy) last.qty += remaining;
+      else makings.push({ qty: remaining, includeOptional: policy });
+    }
+
+    let combined: ProductionResult | undefined;
+    for (const making of makings) {
+      const inner = produceInner(db, itemId, making.qty, {
+        ...options,
+        on,
+        includeOptional: making.includeOptional,
+      });
+      if (options.settleOrders === true) settleCommittedOrders(db, itemId, making.qty, options.settlePegs);
+      combined =
+        combined === undefined
+          ? inner
+          : {
+              ...combined,
+              qty: combined.qty + inner.qty,
+              servings: combined.servings + inner.servings,
+              cost: combined.cost + inner.cost,
+              consumed: [...combined.consumed, ...inner.consumed],
+              shortages: [...combined.shortages, ...inner.shortages],
+              minutes: combined.minutes + inner.minutes,
+            };
+    }
+    result = combined!;
   }
 
   // The cost of a meal is the cost of the lots it came out of, whether those
@@ -898,9 +934,7 @@ function settleableOrders(db: Database, itemId: ItemId, pegs?: readonly string[]
  * `scalable: false` input, however many meals share it. Perishable orders
  * whose planned start is later than the cook date are left standing — the
  * shelf-life proof behind a merge is anchored at its planned start, and a
- * batch made early may not keep for the meals the proof promised. Also
- * reports whether any swept order was committed with its optional
- * components, so the batch can be cooked as it was committed.
+ * batch made early may not keep for the meals the proof promised.
  */
 function committedMakeQty(
   db: Database,
@@ -908,16 +942,14 @@ function committedMakeQty(
   gap: number,
   on: IsoDate,
   pegs?: readonly string[],
-): { qty: number; includeOptional: boolean } {
+): number {
   let boundary = 0;
-  let includeOptional = false;
   for (const order of settleableOrders(db, item.id, pegs)) {
     if (boundary + 1e-9 >= gap) break;
     if (item.shelfLifeDays !== undefined && on < order.startOn) break;
     boundary += order.qty;
-    if (order.includeOptional === true) includeOptional = true;
   }
-  return { qty: boundary > gap ? boundary : gap, includeOptional };
+  return boundary > gap ? boundary : gap;
 }
 
 /**

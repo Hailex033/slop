@@ -973,6 +973,36 @@ test('a negative order price is rejected before it poisons the lot cost', () => 
   assert.equal(database.lots.length, 0, 'nothing booked at a nonsense cost');
 });
 
+test('separately committed policies stay separate makings on one serve', () => {
+  const database = db(
+    [purchased('base9'), purchased('garnish9'), made('plate9')],
+    [
+      recipe('plate9', 1000, [
+        { itemId: 'base9', qty: 1000, uom: 'g' },
+        { itemId: 'garnish9', qty: 100, uom: 'g', optional: true },
+      ], { servings: 2 }),
+    ],
+  );
+  // Two dinners committed separately: Friday plain, Saturday --optional.
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'plate9', servings: 2 });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-04', slot: 'dinner', itemId: 'plate9', servings: 2 });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7, includeOptional: true }));
+
+  // Exactly what the two plans bought: base for both, garnish for one.
+  receive(database, 'base9', { qty: 2000, on: '2026-07-01' });
+  receive(database, 'garnish9', { qty: 100, on: '2026-07-01' });
+
+  // One serve spanning both meals is two pots with two policies — not one
+  // union pot that cooks the plain batch with garnish nobody bought and
+  // fails short on exactly the planned stock.
+  const result = serve(database, 'plate9', 4, { on: '2026-07-04' });
+  assert.equal(result.shortages.length, 0, JSON.stringify(result.shortages));
+  assert.ok(close(onHand(database, 'garnish9'), 0), 'the optional batch used its garnish');
+  assert.ok(close(onHand(database, 'base9'), 0), 'and both used their base');
+  assert.ok(database.productionOrders.every((o) => o.status === 'received'), 'both commitments met');
+});
+
 test('a plain serve cooks a committed batch with its committed garnish', () => {
   const database = db(
     [purchased('polentabase'), purchased('shavings2'), made('bowl')],
