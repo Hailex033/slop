@@ -1076,13 +1076,18 @@ const commands: Record<string, Command> = {
         for (const issue of issues) out(`  ${f.style('✗', 'red')} ${issue}`);
       }
 
-      const codes = lowLevelCodes(ctx.db);
-      const deepest = [...codes.entries()].sort((a, b) => b[1] - a[1])[0];
+      // Low-level codes are only defined for an acyclic graph — computing
+      // them on the very database doctor just diagnosed as cyclic would
+      // throw through the generic handler and eat the report.
+      const deepest =
+        cycles.length === 0
+          ? [...lowLevelCodes(ctx.db).entries()].sort((a, b) => b[1] - a[1])[0]
+          : undefined;
       out();
       out(
         f.style(
           `  ${ctx.db.items.length} items · ${ctx.db.recipes.length} recipes · ` +
-            `deepest nesting ${deepest ? `${deepest[1]} (${mustItem(ctx.db, deepest[0]).name})` : '0'}`,
+            `deepest nesting ${deepest ? `${deepest[1]} (${mustItem(ctx.db, deepest[0]).name})` : cycles.length > 0 ? 'n/a (cyclic)' : '0'}`,
           'grey',
         ),
       );

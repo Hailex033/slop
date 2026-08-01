@@ -242,6 +242,19 @@ export function validate(db: Database): string[] {
       issues.push(`Item "${item.id}" has unknown stock unit "${item.stockUom}".`);
       continue;
     }
+    // Conversion coefficients must be positive and finite: a negative
+    // density converts a recipe line into a negative requirement, which the
+    // whole engine reads as "needs nothing" — a dish planned and cooked
+    // without one of its ingredients.
+    for (const [field, value] of [
+      ['densityGPerMl', item.densityGPerMl],
+      ['unitWeightG', item.unitWeightG],
+      ['unitVolumeMl', item.unitVolumeMl],
+    ] as const) {
+      if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
+        issues.push(`Item "${item.id}" has a non-positive ${field} of ${value}.`);
+      }
+    }
     if (item.sourcing === 'purchased' && !item.purchase) {
       issues.push(`Purchased item "${item.id}" has no purchase info (supplier, pack, price).`);
     }

@@ -608,6 +608,35 @@ test('ignoring stock does not ignore commitments already made', () => {
   assert.ok(close(butter.qty, 100_000), `got ${butter.qty}`);
 });
 
+test('sibling phantom rests overlap; they do not stack', () => {
+  const database = db(
+    [purchased('flour'), purchased('milk2'), phantom('dough'), phantom('batter'), made('bake')],
+    [
+      recipe('dough', 500, [{ itemId: 'flour', qty: 300, uom: 'g' }], {
+        steps: [{ text: 'rest', activeMin: 5, passiveMin: 300 }],
+      }),
+      recipe('batter', 500, [{ itemId: 'milk2', qty: 300, uom: 'g' }], {
+        steps: [{ text: 'rest too', activeMin: 5, passiveMin: 300 }],
+      }),
+      recipe('bake', 1000, [
+        { itemId: 'dough', qty: 500, uom: 'g' },
+        { itemId: 'batter', qty: 500, uom: 'g' },
+      ], { steps: [{ text: 'assemble', activeMin: 20 }] }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'bake', servings: 1 });
+
+  const run = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }).production.find(
+    (order) => order.itemId === 'bake',
+  )!;
+
+  // Both rests happen side by side: 30 hands-on minutes, one 300-minute
+  // wait — not the 600 that pushed the start back an extra day.
+  assert.equal(run.activeMin, 30);
+  assert.equal(run.passiveMin, 300);
+  assert.equal(run.minutes, 330);
+});
+
 test("a phantom's work is folded into the run that consumes it", () => {
   const database = db(
     [purchased('flour'), phantom('dough'), made('sheets')],

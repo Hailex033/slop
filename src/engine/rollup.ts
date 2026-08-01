@@ -597,7 +597,11 @@ export function runMinutesWithPhantoms(
 ): { active: number; passive: number; total: number } {
   const own = runMinutes(recipe, batches);
   let active = own.active;
-  let passive = own.passive;
+  // Hands-on time serialises — one cook — so phantom actives sum. Their
+  // waits do not: two doughs rest side by side, so sibling passives combine
+  // as the longest, and the parent's own wait follows after. Summing them
+  // planned two independent five-hour rests as ten and started days early.
+  let longestChildPassive = 0;
 
   for (const component of recipe.components) {
     // The same toggle the plan used: an optional phantom whose ingredients
@@ -623,9 +627,10 @@ export function runMinutesWithPhantoms(
       new Set(seen).add(item.id),
     );
     active += inner.active;
-    passive += inner.passive;
+    longestChildPassive = Math.max(longestChildPassive, inner.passive);
   }
 
+  const passive = own.passive + longestChildPassive;
   return { active, passive, total: active + passive };
 }
 

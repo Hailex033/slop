@@ -118,6 +118,17 @@ test('duplicate suppliers and impossible slots are integrity problems', () => {
   assert.ok(issues.some((issue) => issue.includes('unknown slot "supper"')));
 });
 
+test('a negative conversion coefficient is an integrity problem', () => {
+  const database = db([
+    purchased('oil', { stockUom: 'ml', densityGPerMl: -0.9 }),
+    purchased('egg2', { stockUom: 'ea', unitWeightG: 0 }),
+  ]);
+
+  const issues = validate(database);
+  assert.ok(issues.some((issue) => issue.includes('non-positive densityGPerMl')), JSON.stringify(issues));
+  assert.ok(issues.some((issue) => issue.includes('non-positive unitWeightG')));
+});
+
 test('dates that are not dates are integrity problems too', () => {
   const database = db([purchased('flour')]);
   database.mealPlan.push({
