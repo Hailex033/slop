@@ -725,7 +725,10 @@ const commands: Record<string, Command> = {
           );
         }
         const entry = {
-          id: nextId('MP', ctx.db.mealPlan),
+          // Removed entries whose ids live on in order pegs stay reserved:
+          // a recycled id would make old commitments point at the new meal,
+          // misattributing their ingredients and their settlements.
+          id: nextId('MP', ctx.db.mealPlan, ctx.db.productionOrders.flatMap((o) => o.pegging ?? [])),
           date: parseDate(rawDate),
           slot: rawSlot as MealSlot,
           itemId: item.id,

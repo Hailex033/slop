@@ -19,6 +19,15 @@ export function lotsOf(db: Database, itemId: ItemId): Lot[] {
   return db.lots.filter((lot) => lot.itemId === itemId && lot.qty > 0);
 }
 
+/** Lot ids the ledger still remembers — retired lots keep their ids reserved. */
+function ledgerLotIds(db: Database): string[] {
+  const ids: string[] = [];
+  for (const txn of db.ledger) {
+    if (txn.lotId !== undefined) ids.push(txn.lotId);
+  }
+  return ids;
+}
+
 /**
  * Can this lot be put to use on `asOf`?
  *
@@ -160,7 +169,10 @@ export function receive(db: Database, itemId: ItemId, options: ReceiveOptions): 
   const location = options.location ?? item.storage;
 
   const lot: Lot = {
-    id: nextId('LOT', db.lots),
+    // Depleted lots leave the shelf but not the ledger: their ids stay
+    // reserved, or a new receipt would share an id with the history of a
+    // lot it never was.
+    id: nextId('LOT', db.lots, ledgerLotIds(db)),
     itemId,
     qty,
     receivedOn: on,

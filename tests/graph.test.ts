@@ -224,6 +224,28 @@ test('history and order lines are integrity-checked too', () => {
   assert.ok(issues.some((i) => i.includes('invalid unitPrice (-1)')));
 });
 
+test('quantities that are not numbers are integrity problems', () => {
+  const database = db(
+    [purchased('flour'), made('bread2')],
+    [
+      recipe('bread2', Number.NaN, [
+        { itemId: 'flour', qty: 'oops' as never, uom: 'g' },
+        { itemId: 'flour', qty: 100, uom: 'g', lossPct: Number.NaN },
+      ]),
+    ],
+  );
+  database.lots.push({ id: 'LOT-1', itemId: 'flour', qty: 'oops' as never, receivedOn: '2026-07-01' });
+
+  // Every ordered comparison is false for NaN, so all of these passed
+  // doctor while production cooked NaN into the ledger and MRP reported
+  // uncovered meals as covered.
+  const issues = validate(database);
+  assert.ok(issues.some((i) => i.includes('invalid quantity (oops) of "flour"')), JSON.stringify(issues));
+  assert.ok(issues.some((i) => i.includes('out-of-range lossPct')));
+  assert.ok(issues.some((i) => i.includes('invalid yield of NaN')));
+  assert.ok(issues.some((i) => i.includes('Lot "LOT-1" has an invalid quantity (oops)')));
+});
+
 test('order quantities and dates are integrity-checked too', () => {
   const database = db([purchased('flour')]);
   // Doctor used to approve these; executeOrder then refused the zero batch

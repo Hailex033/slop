@@ -16,7 +16,23 @@ import {
   sweepExpired,
   usableLots,
 } from '../src/engine/inventory.js';
+import { nextId } from '../src/domain/ids.js';
 import { close, db, phantom, purchased } from './helpers.js';
+
+test('a consumed lot keeps its id reserved in the ledger', () => {
+  const database = db([purchased('flour')]);
+  const first = receive(database, 'flour', { qty: 100, on: '2026-07-01' });
+  issue(database, 'flour', { qty: 100, on: '2026-07-02' });
+  assert.equal(database.lots.length, 0, 'the empty lot leaves the shelf');
+
+  // The ledger still tells the first lot's story; a new receipt must not
+  // continue it under the same name.
+  const second = receive(database, 'flour', { qty: 50, on: '2026-07-03' });
+  assert.notEqual(second.id, first.id);
+
+  // The same reservation protects meal-plan ids held only by order pegs.
+  assert.equal(nextId('MP', [], ['MP-0007']), 'MP-0008');
+});
 
 test('a lot of nothing is refused, not booked', () => {
   // `stock add flour 0` used to print success while the pantry filtered the

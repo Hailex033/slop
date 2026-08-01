@@ -346,15 +346,24 @@ export function validate(db: Database): string[] {
       issues.push(`Recipe "${recipe.id}" produces unknown item "${recipe.outputItemId}".`);
       continue;
     }
-    if (recipe.yieldQty <= 0) issues.push(`Recipe "${recipe.id}" has a non-positive yield.`);
-    if (recipe.servings <= 0) issues.push(`Recipe "${recipe.id}" has a non-positive serving count.`);
+    // NaN slips through every ordered comparison — `NaN <= 0` is false — so
+    // each numeric check here starts from finiteness.
+    if (!Number.isFinite(recipe.yieldQty) || recipe.yieldQty <= 0) {
+      issues.push(`Recipe "${recipe.id}" has an invalid yield of ${recipe.yieldQty}.`);
+    }
+    if (!Number.isFinite(recipe.servings) || recipe.servings <= 0) {
+      issues.push(`Recipe "${recipe.id}" has an invalid serving count of ${recipe.servings}.`);
+    }
     if (!canConvert(recipe.yieldUom as UomCode, output.stockUom, conversionContext(output))) {
       issues.push(
         `Recipe "${recipe.id}" yields ${recipe.yieldUom} but "${output.id}" stocks in ` +
           `${output.stockUom}, and no conversion bridges them.`,
       );
     }
-    if (recipe.massYield !== undefined && (recipe.massYield <= 0 || recipe.massYield > 1.5)) {
+    if (
+      recipe.massYield !== undefined &&
+      (!Number.isFinite(recipe.massYield) || recipe.massYield <= 0 || recipe.massYield > 1.5)
+    ) {
       issues.push(`Recipe "${recipe.id}" has an implausible massYield of ${recipe.massYield}.`);
     }
     if (recipe.components.length === 0) {
@@ -367,8 +376,10 @@ export function validate(db: Database): string[] {
         issues.push(`Recipe "${recipe.id}" references unknown item "${component.itemId}".`);
         continue;
       }
-      if (component.qty < 0) {
-        issues.push(`Recipe "${recipe.id}" has a negative quantity of "${component.itemId}".`);
+      if (!Number.isFinite(component.qty) || component.qty < 0) {
+        // Production would convert this to NaN, issue a NaN off the lots,
+        // and still book the dish with a NaN cost — all without a shortage.
+        issues.push(`Recipe "${recipe.id}" has an invalid quantity (${component.qty}) of "${component.itemId}".`);
       }
       if (!canConvert(component.uom, child.stockUom, conversionContext(child))) {
         issues.push(
@@ -376,7 +387,10 @@ export function validate(db: Database): string[] {
             `${child.stockUom}; add densityGPerMl or unitWeightG to "${child.id}".`,
         );
       }
-      if (component.lossPct !== undefined && (component.lossPct < 0 || component.lossPct >= 1)) {
+      if (
+        component.lossPct !== undefined &&
+        (!Number.isFinite(component.lossPct) || component.lossPct < 0 || component.lossPct >= 1)
+      ) {
         issues.push(`Recipe "${recipe.id}" has an out-of-range lossPct for "${component.itemId}".`);
       }
     }
@@ -387,7 +401,11 @@ export function validate(db: Database): string[] {
   // nonsense while formatting may show a different calendar day entirely.
   for (const lot of db.lots) {
     if (!findItem(db, lot.itemId)) issues.push(`Lot "${lot.id}" references unknown item "${lot.itemId}".`);
-    if (lot.qty < 0) issues.push(`Lot "${lot.id}" has a negative quantity.`);
+    // MRP feeds this straight into Math.min: a NaN quantity silently turns
+    // the remaining requirement into NaN, and no shortfall is ever emitted.
+    if (!Number.isFinite(lot.qty) || lot.qty < 0) {
+      issues.push(`Lot "${lot.id}" has an invalid quantity (${lot.qty}).`);
+    }
     if (!isIsoDate(lot.receivedOn)) {
       issues.push(`Lot "${lot.id}" has an invalid receivedOn date "${lot.receivedOn}".`);
     }

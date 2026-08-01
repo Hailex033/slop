@@ -5,13 +5,22 @@
  * produce the same ids, which keeps tests and diffs of the JSON store stable.
  */
 
-export function nextId(prefix: string, existing: Iterable<{ id: string }>): string {
+export function nextId(
+  prefix: string,
+  existing: Iterable<{ id: string }>,
+  retired: Iterable<string> = [],
+): string {
   const pattern = new RegExp(`^${prefix}-(\\d+)$`);
   let highest = 0;
-  for (const { id } of existing) {
+  const bump = (id: string): void => {
     const match = pattern.exec(id);
     if (match) highest = Math.max(highest, Number(match[1]));
-  }
+  };
+  for (const { id } of existing) bump(id);
+  // Ids that live on only in history — ledger lot references, order pegs —
+  // stay reserved: reusing one would graft a new row onto an old audit
+  // trail. Ids of a different shape are simply ignored.
+  for (const id of retired) bump(id);
   return `${prefix}-${String(highest + 1).padStart(4, '0')}`;
 }
 
