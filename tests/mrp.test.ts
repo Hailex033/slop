@@ -142,6 +142,33 @@ test('a committed optional policy survives replanning a stocked child', () => {
   assert.equal(relishOrder.includeOptional, true);
 });
 
+test('a run that cannot finish in time is a conflict, not a commitment', () => {
+  const database = db(
+    [purchased('flour'), made('slowloaf')],
+    [
+      recipe('slowloaf', 1000, [{ itemId: 'flour', qty: 600, uom: 'g' }], {
+        servings: 2,
+        // A two-night prove: due today, it should have started days ago.
+        steps: [{ text: 'long prove', activeMin: 30, passiveMin: 960 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-01', slot: 'dinner', itemId: 'slowloaf', servings: 2 });
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const run = result.production.find((p) => p.itemId === 'slowloaf')!;
+  assert.equal(run.late, true);
+  assert.ok(result.conflicts.some((c) => c.includes('slowloaf')), JSON.stringify(result.conflicts));
+  // The ingredients are still planned, so the batch can be cooked late.
+  assert.ok(result.lines.some((l) => l.itemId === 'flour' && l.net > 0));
+
+  // Committing must not persist the clamped span: MRP would count the
+  // output as supply — and execution would date its completion — before
+  // the batch could exist.
+  const orders = commitProduction(database, result);
+  assert.ok(!orders.some((o) => o.itemId === 'slowloaf'), 'an impossible span is never persisted');
+});
+
 test('--ignore-stock still rebuilds safety stock', () => {
   const database = db([purchased('salt2', { safetyStock: 500 })]);
   receive(database, 'salt2', { qty: 1000, on: '2026-07-01' });

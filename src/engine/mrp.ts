@@ -102,6 +102,13 @@ export interface PlannedProduction {
    * the MRP run's own flag when a covered demand carried a committed one.
    */
   readonly includeOptional?: boolean;
+  /**
+   * True when the run cannot finish by its due date however soon it
+   * starts. The same rule as a late purchase line: a conflict needing a
+   * decision, never a commitment — persisting the clamped span would
+   * promise supply before the batch could exist.
+   */
+  readonly late?: boolean;
 }
 
 export interface MrpLine {
@@ -408,7 +415,8 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
         // prep task on a day that has gone — the same courtesy the buy side
         // gets when a shop cannot deliver in time.
         const startOn = maxDate(asOf, wantedStart);
-        if (wantedStart < asOf) {
+        const late = wantedStart < asOf;
+        if (late) {
           conflicts.push(
             `${item.name} needs ${Math.round(minutes / 60)}h and is due ${run.dueOn}, so it should ` +
               `have been started on ${wantedStart} — the earliest it can now begin is ${startOn}.`,
@@ -429,6 +437,7 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
           level,
           pegging: run.sources,
           includeOptional: runOptional,
+          ...(late ? { late: true } : {}),
         });
 
         // Dependent demand, due when production starts rather than when it ends.
@@ -829,6 +838,13 @@ export function commitProduction(db: Database, result: MrpResult): ProductionOrd
   }
   const created: ProductionOrder[] = [];
   for (const planned of result.production) {
+    // The same rule the buy side applies: a late line is a conflict, not an
+    // order. Committing a run that cannot finish by its due date would
+    // persist a clamped, impossible span — MRP would count its output as
+    // supply, and execution would date its completion, before the batch
+    // could exist. The conflict stays visible until the plan or the meal
+    // moves; the ingredients are still planned, so it can be cooked late.
+    if (planned.late === true) continue;
     const order: ProductionOrder = {
       id: nextId('PRD', [...db.productionOrders, ...created]),
       itemId: planned.itemId,
