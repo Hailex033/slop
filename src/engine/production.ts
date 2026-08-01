@@ -9,7 +9,7 @@
  * the same recursive structure the shopping list uses.
  */
 
-import { conversionContext, findItem, isMade, isStocked, mustItem, recipeFor } from '../domain/db.js';
+import { conversionContext, findItem, isMade, isStocked, mustItem, recipeFor, remainingServings } from '../domain/db.js';
 import { addDays, maxDate, today, type IsoDate } from '../domain/date.js';
 import { CycleError, MiseError, NotFoundError } from '../domain/errors.js';
 import { convert } from '../domain/units.js';
@@ -662,8 +662,6 @@ export function serve(
   }
 
   const on = options.on ?? today();
-  const remainingOf = (entry: { servings: number; servedServings?: number }): number =>
-    entry.servings - (entry.servedServings ?? 0);
 
   // An explicit plan entry is validated *before* anything moves: a stale or
   // mistaken id must not silently retire a different dish's demand — and
@@ -671,14 +669,17 @@ export function serve(
   let entry;
   if (options.planEntryId !== undefined) {
     entry = db.mealPlan.find((candidate) => candidate.id === options.planEntryId);
-    if (!entry || entry.itemId !== itemId || remainingOf(entry) <= 1e-9) {
+    if (!entry || entry.itemId !== itemId || remainingServings(entry) <= 1e-9) {
       throw new MiseError(
         `Plan entry "${options.planEntryId}" is not an unserved entry for "${mustItem(db, itemId).name}".`,
       );
     }
   } else {
     entry = db.mealPlan
-      .filter((candidate) => candidate.itemId === itemId && remainingOf(candidate) > 1e-9 && candidate.date <= on)
+      .filter(
+        (candidate) =>
+          candidate.itemId === itemId && remainingServings(candidate) > 1e-9 && candidate.date <= on,
+      )
       .sort((a, b) => a.date.localeCompare(b.date))[0];
   }
 
@@ -694,7 +695,7 @@ export function serve(
   // history when the last of them goes.
   if (entry) {
     entry.servedServings = Math.min(entry.servings, (entry.servedServings ?? 0) + servings);
-    if (remainingOf(entry) <= 1e-9) entry.servedOn = on;
+    if (remainingServings(entry) <= 1e-9) entry.servedOn = on;
     return { ...result, servedPlanEntryId: entry.id };
   }
   return result;

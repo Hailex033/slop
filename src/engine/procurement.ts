@@ -51,6 +51,8 @@ export interface ShoppingList {
   readonly currency: string;
   /** Lines that could not be priced or sourced. */
   readonly unresolved: readonly ShoppingLine[];
+  /** Carried from the planning run, so committing can refuse a broken plan. */
+  readonly problems: readonly string[];
 }
 
 /** Round a requirement up to whole packs, honouring any minimum order. */
@@ -112,6 +114,7 @@ export function shoppingList(
     total: lines.reduce((sum, line) => sum + line.lineCost, 0),
     currency: db.settings.currency,
     unresolved: lines.filter((line) => line.problem !== undefined),
+    problems: mrp.problems,
   };
 }
 
@@ -204,6 +207,14 @@ export function raisePurchaseOrders(
   list: ShoppingList,
   on: IsoDate = today(),
 ): PurchaseOrder[] {
+  // The same rule production commits follow: a plan with data problems
+  // planned around holes, and paying for the surviving ingredients of a
+  // dish that cannot be cooked just moves the damage into the order book.
+  if (list.problems.length > 0) {
+    throw new MiseError(
+      `Cannot commit a plan with data problems:\n  - ${list.problems.join('\n  - ')}`,
+    );
+  }
   // One order per *trip*, not per supplier. Two visits to the same market on
   // different Saturdays are two orders arriving on two different days, and
   // collapsing them would misdate one of them. Lead time is part of the key

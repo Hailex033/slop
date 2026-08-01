@@ -6,6 +6,7 @@ import type {
   Database,
   Item,
   ItemId,
+  MealPlanEntry,
   Recipe,
   Settings,
   Supplier,
@@ -141,6 +142,19 @@ export function findSupplier(db: Database, id: SupplierId): Supplier | undefined
 /** Recipes that directly consume `itemId`. */
 export function directParents(db: Database, itemId: ItemId): readonly Recipe[] {
   return indexes(db).usedBy.get(itemId) ?? [];
+}
+
+/**
+ * Portions of a plan entry not yet served.
+ *
+ * `servedOn` with no quantity — data written before `servedServings`
+ * existed, or a hand edit — means fully served: the completion marker must
+ * not be quietly outvoted by a missing number, or planning re-buys meals
+ * already recorded as eaten.
+ */
+export function remainingServings(entry: MealPlanEntry): number {
+  const served = entry.servedServings ?? (entry.servedOn ? entry.servings : 0);
+  return entry.servings - served;
 }
 
 /** True when the item has a recipe and should be expanded rather than bought. */

@@ -14,6 +14,7 @@ import {
   householdServings,
   mustItem,
   recipeFor,
+  remainingServings,
   resolveItem,
   validate,
 } from './domain/db.js';
@@ -692,17 +693,19 @@ const commands: Record<string, Command> = {
         .sort((a, b) => a.date.localeCompare(b.date) || a.slot.localeCompare(b.slot));
 
       out(f.heading('Meal plan'));
+      // Portions still to serve, not the original booking: after one plate
+      // of a six-portion entry, five remain — the number planning uses.
       out(
         f.table(entries, [
           { header: 'Id', get: (e) => f.style(e.id, 'grey') },
           { header: 'Date', get: (e) => formatDate(e.date) },
           { header: 'Slot', get: (e) => e.slot },
           { header: 'Dish', get: (e) => mustItem(ctx.db, e.itemId).name },
-          { header: 'Servings', get: (e) => f.num(e.servings), align: 'right' },
+          { header: 'Servings', get: (e) => f.num(remainingServings(e)), align: 'right' },
           {
             header: 'Cost',
             get: (e) => {
-              const target = quantityForServings(ctx.db, e.itemId, e.servings);
+              const target = quantityForServings(ctx.db, e.itemId, remainingServings(e));
               return f.money(costOf(ctx.db, e.itemId, target.qty, target.uom).total, ctx.db.settings.currency);
             },
             align: 'right',
@@ -712,7 +715,7 @@ const commands: Record<string, Command> = {
       );
 
       const total = entries.reduce((sum, entry) => {
-        const target = quantityForServings(ctx.db, entry.itemId, entry.servings);
+        const target = quantityForServings(ctx.db, entry.itemId, remainingServings(entry));
         return sum + costOf(ctx.db, entry.itemId, target.qty, target.uom).total;
       }, 0);
       out();
@@ -1171,10 +1174,10 @@ const commands: Record<string, Command> = {
 
       const meals = ctx.db.mealPlan.filter((e) => !e.servedOn && e.date >= today());
       const weekCost = meals.reduce((sum, entry) => {
-        const target = quantityForServings(ctx.db, entry.itemId, entry.servings);
+        const target = quantityForServings(ctx.db, entry.itemId, remainingServings(entry));
         return sum + costOf(ctx.db, entry.itemId, target.qty, target.uom).total;
       }, 0);
-      const totalServings = meals.reduce((sum, entry) => sum + entry.servings, 0);
+      const totalServings = meals.reduce((sum, entry) => sum + remainingServings(entry), 0);
       out(
         `  Cost per serving   ${totalServings > 0 ? f.money(weekCost / totalServings, currency) : '—'}` +
           f.style(`  (${f.num(totalServings)} servings planned)`, 'grey'),

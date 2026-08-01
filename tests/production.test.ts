@@ -216,6 +216,46 @@ test('a partial serving retires only the portions eaten', () => {
   assert.ok(!runMrp(database, { asOf: '2026-07-03', horizonDays: 7 }).production.some((o) => o.itemId === 'dish'));
 });
 
+test('a legacy fully-served entry stays history without a quantity', () => {
+  const database = nestedDb();
+  // Data written before servedServings existed: the completion marker alone.
+  database.mealPlan.push({
+    id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 4, servedOn: '2026-07-02',
+  });
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(!result.production.some((o) => o.itemId === 'dish'), 'servedOn alone means fully served');
+
+  // And a serve today must not re-open it either.
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 500, on: '2026-06-30' });
+  const served = serve(database, 'dish', 4, { on: '2026-07-03' });
+  assert.equal(served.servedPlanEntryId, undefined, 'history is not a match');
+});
+
+test('purchase commits refuse an invalid plan too', () => {
+  const database = db(
+    [purchased('flour'), made('bread')],
+    [
+      recipe('bread', 1000, [
+        { itemId: 'flour', qty: 600, uom: 'g' },
+        { itemId: 'ghost', qty: 100, uom: 'g' },
+      ]),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'bread', servings: 1 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const list = shoppingList(database, mrp);
+  assert.ok(list.problems.length > 0, 'the list carries the run\'s problems');
+
+  // Paying for the surviving ingredients of a dish that cannot be cooked
+  // just moves the damage into the order book.
+  assert.throws(() => raisePurchaseOrders(database, list, '2026-07-01'), /Cannot commit/);
+  assert.equal(database.purchaseOrders.length, 0);
+});
+
 test('an explicit plan entry must match the dish being served', () => {
   const database = nestedDb();
   database.mealPlan.push({ id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'cheese', servings: 100 });

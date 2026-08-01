@@ -24,6 +24,7 @@ import {
   isStocked,
   mustItem,
   recipeFor,
+  remainingServings,
 } from '../domain/db.js';
 import { addDays, daysBetween, maxDate, today, weekdayIndex, type IsoDate } from '../domain/date.js';
 import { MiseError } from '../domain/errors.js';
@@ -150,7 +151,7 @@ export function demandFromPlan(
     .filter((entry) => entry.date >= from && entry.date <= until)
     // Demand is what remains to be served. A fully served entry is history;
     // a partially served one still wants its other portions.
-    .map((entry) => ({ entry, remaining: entry.servings - (entry.servedServings ?? 0) }))
+    .map((entry) => ({ entry, remaining: remainingServings(entry) }))
     .filter(({ remaining }) => remaining > 1e-9)
     .map(({ entry, remaining }) => ({
       itemId: entry.itemId,
