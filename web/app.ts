@@ -9,7 +9,7 @@
 
 import { seedDatabase } from '../src/data/seed.js';
 import { formatDate, today, type IsoDate } from '../src/domain/date.js';
-import { householdServings, mustItem, recipeFor } from '../src/domain/db.js';
+import { householdServings, mustItem, normalizeDb, recipeFor } from '../src/domain/db.js';
 import { MiseError } from '../src/domain/errors.js';
 import type { Database, Item, ItemId } from '../src/domain/types.js';
 import type { UomCode } from '../src/domain/units.js';
@@ -102,7 +102,10 @@ const STORAGE_KEY = 'mise.db.v1';
 function loadState(): Database {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw) as Database;
+    // Same normalisation as the CLI's file store: a blob persisted by an
+    // older version may lack later-added collections, and reading it raw
+    // crashed every view that touched them instead of keeping the pantry.
+    if (raw) return normalizeDb(JSON.parse(raw) as Partial<Database>);
   } catch {
     /* corrupt or unavailable storage: fall back to the seed */
   }

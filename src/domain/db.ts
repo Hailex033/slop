@@ -147,6 +147,24 @@ export function directParents(db: Database, itemId: ItemId): readonly Recipe[] {
 }
 
 /**
+ * Merge a parsed, possibly partial database onto the defaults, so a file or
+ * localStorage blob written by an older version still loads with every
+ * collection present. Settings merge *after* the top-level spread: spreading
+ * the partial last would put its incomplete settings object back over the
+ * defaults and hand undefined horizons and households to the planner. Both
+ * loaders — the CLI's file store and the browser's localStorage — go
+ * through here, so neither can drift.
+ */
+export function normalizeDb(parsed: Partial<Database>): Database {
+  const base = emptyDb();
+  return {
+    ...base,
+    ...parsed,
+    settings: { ...base.settings, ...(parsed.settings ?? {}) },
+  } as Database;
+}
+
+/**
  * Portions of a plan entry not yet served.
  *
  * `servedOn` with no quantity — data written before `servedServings`
@@ -362,6 +380,39 @@ export function validate(db: Database): string[] {
     }
     if (!isIsoDate(entry.date)) {
       issues.push(`Meal plan entry "${entry.id}" has an invalid date "${entry.date}".`);
+    }
+    // remainingServings turns a bad served count into phantom demand (below
+    // zero) or a silent suppression (above the booking) — neither of which
+    // is a real state of a dinner.
+    if (
+      entry.servedServings !== undefined &&
+      (!Number.isFinite(entry.servedServings) ||
+        entry.servedServings < 0 ||
+        entry.servedServings > entry.servings + 1e-9)
+    ) {
+      issues.push(
+        `Meal plan entry "${entry.id}" has an invalid servedServings of ` +
+          `${entry.servedServings} (servings: ${entry.servings}).`,
+      );
+    }
+  }
+
+  // The order book holds references too. A deleted item inside an open
+  // order makes the receipt throw at mustItem — an order that can never be
+  // received, in a database doctor called valid.
+  for (const order of db.purchaseOrders) {
+    if (!findSupplier(db, order.supplierId)) {
+      issues.push(`Purchase order "${order.id}" references unknown supplier "${order.supplierId}".`);
+    }
+    for (const line of order.lines) {
+      if (!findItem(db, line.itemId)) {
+        issues.push(`Purchase order "${order.id}" has a line for unknown item "${line.itemId}".`);
+      }
+    }
+  }
+  for (const order of db.productionOrders) {
+    if (!findItem(db, order.itemId)) {
+      issues.push(`Production order "${order.id}" references unknown item "${order.itemId}".`);
     }
   }
 

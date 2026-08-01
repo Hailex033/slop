@@ -129,6 +129,30 @@ test('a negative conversion coefficient is an integrity problem', () => {
   assert.ok(issues.some((issue) => issue.includes('non-positive unitWeightG')));
 });
 
+test('impossible served counts and orphaned orders are integrity problems', () => {
+  const database = db([purchased('flour')]);
+  database.mealPlan.push({
+    id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'flour', servings: 4, servedServings: -2,
+  });
+  database.mealPlan.push({
+    id: 'MP-2', date: '2026-07-04', slot: 'dinner', itemId: 'flour', servings: 4, servedServings: 9,
+  });
+  database.purchaseOrders.push({
+    id: 'PO-1', supplierId: 'nobody', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
+    lines: [{ itemId: 'ghost', packs: 1, unitPrice: 1 }],
+  });
+  database.productionOrders.push({
+    id: 'PRD-1', itemId: 'vanished', qty: 100, dueOn: '2026-07-03', startOn: '2026-07-03', status: 'open',
+  });
+
+  const issues = validate(database);
+  assert.ok(issues.some((i) => i.includes('invalid servedServings of -2')), JSON.stringify(issues));
+  assert.ok(issues.some((i) => i.includes('invalid servedServings of 9')));
+  assert.ok(issues.some((i) => i.includes('unknown supplier "nobody"')));
+  assert.ok(issues.some((i) => i.includes('line for unknown item "ghost"')));
+  assert.ok(issues.some((i) => i.includes('Production order "PRD-1" references unknown item')));
+});
+
 test('dates that are not dates are integrity problems too', () => {
   const database = db([purchased('flour')]);
   database.mealPlan.push({

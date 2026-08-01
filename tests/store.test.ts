@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
-import { DEFAULT_SETTINGS } from '../src/domain/db.js';
+import { DEFAULT_SETTINGS, normalizeDb } from '../src/domain/db.js';
 import { MiseError } from '../src/domain/errors.js';
 import { loadDb, saveDb } from '../src/store.js';
 
@@ -70,4 +70,16 @@ test('a missing database says how to make one', () => {
     assert.match(error.message, /mise init/);
     return true;
   });
+});
+
+test('normalising a partial database fills every collection, browser and CLI alike', () => {
+  // The same function backs the CLI file store and the web localStorage
+  // path, so a blob persisted before a collection existed still loads.
+  const db = normalizeDb({ items: [], settings: { currency: 'EUR' } as never });
+
+  assert.deepEqual(db.productionOrders, []);
+  assert.deepEqual(db.purchaseOrders, []);
+  assert.deepEqual(db.mealPlan, []);
+  assert.equal(db.settings.currency, 'EUR', 'what was saved wins');
+  assert.ok(db.settings.planningHorizonDays > 0, 'defaults fill the gaps');
 });
