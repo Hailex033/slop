@@ -888,6 +888,18 @@ function serveInner(
         // Perishables committed for later keep to their planned start —
         // the same early-execution gate the cascade applies.
         if (item.shelfLifeDays !== undefined && on < order.startOn) break;
+        // A committed multi-day making that was never started cannot be on
+        // the plate today: closing the order — and the meal — over food
+        // that finishes days from now would falsify both. Refuse, the way
+        // an empty pantry is refused; --force still records the serve for
+        // a household that cooked off the books.
+        const spanDays = Math.max(0, daysBetween(order.startOn, order.dueOn));
+        if (spanDays > 0 && options.allowShortages !== true) {
+          throw new MiseError(
+            `"${item.name}" is committed as a multi-day making (${order.id}, ${order.startOn} → ${order.dueOn}); ` +
+              `started now it cannot be served today — execute it on schedule with receive, or use --force.`,
+          );
+        }
         const policy = options.includeOptional ?? (order.includeOptional === true);
         const last = makings[makings.length - 1];
         if (last && last.includeOptional === policy) last.qty += order.qty;

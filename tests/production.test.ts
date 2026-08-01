@@ -882,6 +882,35 @@ test('serving planned meals one by one still cooks the committed batch once', ()
   assert.ok(close(onHand(database, 'sachet2'), 0), 'one making, one sachet');
 });
 
+test('a due meal whose multi-day batch never started cannot be served today', () => {
+  const database = db(
+    [purchased('flour'), made('slowdish')],
+    [
+      recipe('slowdish', 1000, [{ itemId: 'flour', qty: 600, uom: 'g' }], {
+        servings: 2,
+        steps: [{ text: 'long prove', activeMin: 30, passiveMin: 960 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-06', slot: 'dinner', itemId: 'slowdish', servings: 2 });
+  receive(database, 'flour', { qty: 5000, on: '2026-07-01' });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 10 }));
+  const order = database.productionOrders.find((o) => o.itemId === 'slowdish')!;
+  assert.ok(order.startOn < order.dueOn, 'the prove spans days');
+
+  // The prove never happened; dinner time cannot conjure it. Closing the
+  // order and the meal over food that finishes in two days would falsify
+  // both.
+  assert.throws(() => serve(database, 'slowdish', 2, { on: '2026-07-06' }), /multi-day making/);
+  assert.equal(order.status, 'open', 'the commitment still stands');
+  assert.equal(database.mealPlan[0]!.servedOn, undefined, 'the meal is not marked eaten');
+
+  // --force records the serve for a household that cooked off the books.
+  const forced = serve(database, 'slowdish', 2, { on: '2026-07-06', allowShortages: true });
+  assert.equal(forced.servings, 2);
+  assert.equal(order.status, 'received');
+});
+
 test('exactly one serving of stock is one cookable serving', () => {
   const database = db(
     [purchased('flour'), made('bun')],

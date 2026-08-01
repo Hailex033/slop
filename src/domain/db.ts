@@ -537,6 +537,19 @@ export function validate(db: Database): string[] {
       if (!Number.isFinite(line.unitPrice) || line.unitPrice < 0) {
         issues.push(`Purchase order "${order.id}" has a line with an invalid unitPrice (${line.unitPrice}).`);
       }
+      // A snapshotted unit the engine cannot bridge makes runMrp throw on
+      // the inbound supply and the receipt refuse to close the order.
+      if (line.packUom !== undefined) {
+        const lineItem = findItem(db, line.itemId);
+        if (!isUomCode(line.packUom)) {
+          issues.push(`Purchase order "${order.id}" has a line with unknown unit "${line.packUom}".`);
+        } else if (lineItem && !canConvert(line.packUom, lineItem.stockUom, conversionContext(lineItem))) {
+          issues.push(
+            `Purchase order "${order.id}" line for "${lineItem.id}" is in ${line.packUom}, ` +
+              `which does not convert to ${lineItem.stockUom}.`,
+          );
+        }
+      }
     }
   }
   const seenPrdIds = new Set<string>();

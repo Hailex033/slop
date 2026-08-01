@@ -276,6 +276,10 @@ test('history and order lines are integrity-checked too', () => {
     lines: [
       { itemId: 'flour', packs: 0, unitPrice: 1 },
       { itemId: 'flour', packs: 1, unitPrice: -1 },
+      // A snapshotted unit the engine cannot bridge: unknown, then
+      // unbridgeable (flour stocks in g and has no density for ml).
+      { itemId: 'flour', packs: 1, unitPrice: 1, packQty: 2, packUom: 'parsecs' as never },
+      { itemId: 'flour', packs: 1, unitPrice: 1, packQty: 2, packUom: 'ml' },
     ],
   });
 
@@ -283,6 +287,8 @@ test('history and order lines are integrity-checked too', () => {
   assert.ok(issues.some((i) => i.includes('Ledger entry "TXN-1"')), JSON.stringify(issues));
   assert.ok(issues.some((i) => i.includes('invalid packs (0)')));
   assert.ok(issues.some((i) => i.includes('invalid unitPrice (-1)')));
+  assert.ok(issues.some((i) => i.includes('unknown unit "parsecs"')));
+  assert.ok(issues.some((i) => i.includes('is in ml, which does not convert to g')));
 });
 
 test('quantities that are not numbers are integrity problems', () => {
