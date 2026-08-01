@@ -330,6 +330,25 @@ test('a recipe hole makes a dish infeasible, not unlimited', () => {
   );
 });
 
+test('a dangling supplier reference is unresolved, not quietly ordered from', () => {
+  const database = nestedDb();
+  database.items.push({
+    id: 'import', name: 'import', category: 'Test', sourcing: 'purchased', stockUom: 'g',
+    // The supplier this points at was deleted in a hand edit.
+    purchase: { supplierId: 'gone', packQty: 100, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+  });
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'import', servings: 100 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const line = list.lines.find((l) => l.itemId === 'import')!;
+
+  assert.match(line.problem ?? '', /unknown supplier "gone"/);
+  assert.equal(list.unresolved.length, 1);
+  // And no purchase order is raised against a supplier that does not exist.
+  const orders = raisePurchaseOrders(database, list, '2026-07-01');
+  assert.ok(orders.every((order) => order.supplierId !== 'gone'));
+});
+
 test('a free item is priced at zero, not flagged as unpriced', () => {
   const database = nestedDb();
   // The seeded sourdough starter's shape: a standing item replenished for

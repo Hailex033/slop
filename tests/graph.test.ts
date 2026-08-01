@@ -106,6 +106,18 @@ test('where-used climbs past any arbitrary ceiling', () => {
   assert.equal(node.itemId, 'level-19');
 });
 
+test('duplicate suppliers and impossible slots are integrity problems', () => {
+  const database = db([purchased('flour')]);
+  database.suppliers.push({ id: 'shop', name: 'Shop again', leadTimeDays: 2 });
+  database.mealPlan.push({
+    id: 'MP-1', date: '2026-07-03', slot: 'supper' as never, itemId: 'flour', servings: 2,
+  });
+
+  const issues = validate(database);
+  assert.ok(issues.some((issue) => issue.includes('Duplicate supplier id')), JSON.stringify(issues));
+  assert.ok(issues.some((issue) => issue.includes('unknown slot "supper"')));
+});
+
 test('two recipes for one item is an integrity problem, not a quiet last-wins', () => {
   const database = db(
     [purchased('flour'), made('bread')],

@@ -22,6 +22,7 @@ import { addDays, formatDate, parseDate, today, type IsoDate } from './domain/da
 import { MiseError } from './domain/errors.js';
 import { nextId } from './domain/ids.js';
 import { convert, parseQuantity, parseUom, type UomCode } from './domain/units.js';
+import { MEAL_SLOTS } from './domain/types.js';
 import type { Database, ItemId, MealSlot } from './domain/types.js';
 import { seedDatabase } from './data/seed.js';
 import { aggregate, explode, quantityForServings, servingsForQuantity } from './engine/explode.js';
@@ -656,6 +657,11 @@ const commands: Record<string, Command> = {
         }
         const item = resolveItem(ctx.db, ref);
         const servings = rawServings ? parseQuantity(rawServings) : householdServings(ctx.db);
+        // "supper" would persist, survive saves, and pass doctor — a typo
+        // must not become a permanent fifth meal slot.
+        if (!(MEAL_SLOTS as readonly string[]).includes(rawSlot)) {
+          throw new MiseError(`Unknown slot "${rawSlot}". Use one of: ${MEAL_SLOTS.join(', ')}.`);
+        }
         const entry = {
           id: nextId('MP', ctx.db.mealPlan),
           date: parseDate(rawDate),

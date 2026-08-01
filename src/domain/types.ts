@@ -192,7 +192,8 @@ export interface InventoryTxn {
   readonly note?: string;
 }
 
-export type MealSlot = 'breakfast' | 'lunch' | 'dinner' | 'snack';
+export const MEAL_SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'] as const;
+export type MealSlot = (typeof MEAL_SLOTS)[number];
 
 /** The master production schedule: what the household intends to eat, and when. */
 export interface MealPlanEntry {

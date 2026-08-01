@@ -2,6 +2,7 @@
 
 import { NotFoundError, ValidationError } from './errors.js';
 import { canConvert, dimensionOf, isUomCode, type ConversionContext, type UomCode } from './units.js';
+import { MEAL_SLOTS } from './types.js';
 import type {
   Database,
   Item,
@@ -221,6 +222,15 @@ export function householdServings(db: Database): number {
  */
 export function validate(db: Database): string[] {
   const issues: string[] = [];
+
+  // The supplier index keeps one entry per id, so a silent duplicate means
+  // purchase names and delivery-day scheduling depend on array order.
+  const seenSupplierIds = new Set<SupplierId>();
+  for (const supplier of db.suppliers) {
+    if (seenSupplierIds.has(supplier.id)) issues.push(`Duplicate supplier id "${supplier.id}".`);
+    seenSupplierIds.add(supplier.id);
+  }
+
   const seenItemIds = new Set<ItemId>();
 
   for (const item of db.items) {
@@ -324,6 +334,9 @@ export function validate(db: Database): string[] {
       issues.push(`Meal plan entry "${entry.id}" references unknown item "${entry.itemId}".`);
     }
     if (entry.servings <= 0) issues.push(`Meal plan entry "${entry.id}" has non-positive servings.`);
+    if (!MEAL_SLOTS.includes(entry.slot)) {
+      issues.push(`Meal plan entry "${entry.id}" has unknown slot "${entry.slot}".`);
+    }
   }
 
   return issues;

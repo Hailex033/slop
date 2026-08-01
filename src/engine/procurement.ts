@@ -137,12 +137,16 @@ function toShoppingLine(
   // Zero is a price — the seeded sourdough starter genuinely costs nothing
   // to replenish. Only an *absent* or unusable price is a problem; using
   // zero as the sentinel put a perfectly sourceable free item in the
-  // unresolved list.
+  // unresolved list. A supplier id pointing at nobody is a problem too:
+  // without this, the line hid under "Unsourced" and a purchase order was
+  // raised against a supplier that does not exist.
   const problem = !item.purchase
     ? 'no supplier or pack size on file'
-    : unitCost === undefined || !Number.isFinite(unitCost)
-      ? 'no price on file'
-      : undefined;
+    : !supplier
+      ? `unknown supplier "${item.purchase.supplierId}" on file`
+      : unitCost === undefined || !Number.isFinite(unitCost)
+        ? 'no price on file'
+        : undefined;
 
   return {
     itemId: planned.itemId,
