@@ -10,7 +10,7 @@
  */
 
 import { conversionContext, findItem, isMade, isStocked, mustItem, recipeFor, remainingServings } from '../domain/db.js';
-import { addDays, maxDate, today, type IsoDate } from '../domain/date.js';
+import { addDays, daysBetween, maxDate, today, type IsoDate } from '../domain/date.js';
 import { CycleError, MiseError, NotFoundError } from '../domain/errors.js';
 import { convert } from '../domain/units.js';
 import { nextId } from '../domain/ids.js';
@@ -501,6 +501,13 @@ export interface ProduceOptions {
    * pegs recorded stand for the item generally and always participate.
    */
   readonly settlePegs?: readonly string[];
+  /**
+   * The date this making's finished output books into stock, when it
+   * differs from the cook date: a multi-day batch completes — and starts
+   * aging — later than it starts. Applies to this making's own output
+   * only; children cooked inline book at their cook date.
+   */
+  readonly outputOn?: IsoDate;
 }
 
 /**
@@ -537,6 +544,9 @@ function produceInner(
   path: readonly ItemId[] = [],
 ): ProductionResult {
   const { cascade = true, allowShortages = false, includeOptional = false } = options;
+  // The completion date belongs to this making alone — a child cooked
+  // inline books at its cook date, not at the parent's finish line.
+  const { outputOn, ...inherited } = options;
   const on = options.on ?? today();
   const item = mustItem(db, itemId);
   const recipe = recipeFor(db, itemId);
@@ -588,7 +598,7 @@ function produceInner(
         db,
         child.id,
         need,
-        { ...options, on, ref, consumeImmediately: true },
+        { ...inherited, on, ref, consumeImmediately: true },
         nextPath,
       );
       cost += inner.cost;
@@ -625,7 +635,7 @@ function produceInner(
       // one is still issued from stock below, so its output must land there
       // first — inheriting the flag would strand the fresh batch nowhere
       // and fail that issue against an empty shelf.
-      const inner = produceInner(db, child.id, gap, { ...options, on, ref, consumeImmediately: false }, nextPath);
+      const inner = produceInner(db, child.id, gap, { ...inherited, on, ref, consumeImmediately: false }, nextPath);
       cascadedMinutes += inner.minutes;
       shortages.push(...inner.shortages);
       madeToOrder = true;
@@ -667,7 +677,7 @@ function produceInner(
   if (!options.consumeImmediately) {
     const lot = receive(db, itemId, {
       qty,
-      on,
+      on: outputOn ?? on,
       unitCost,
       type: 'produce',
       origin: ref,
@@ -946,11 +956,19 @@ export function executeOrder(db: Database, orderId: string, options: ProduceOpti
   if (order.status === 'cancelled') throw new MiseError(`Production order "${orderId}" was cancelled.`);
   // The order carries the optional policy it was committed with; an explicit
   // caller choice still wins.
+  // A making that spans days finishes later than it starts: the sourdough
+  // begun Friday is bread on Sunday, and it ages from Sunday. Book the
+  // output at the making's completion — the planned span offset from the
+  // actual start — which is also the arrival date MRP promised the supply
+  // for when it merged later meals into this batch.
+  const startedOn = options.on ?? today();
+  const completion = addDays(startedOn, Math.max(0, daysBetween(order.startOn, order.dueOn)));
   const result = produce(db, order.itemId, order.qty, {
     includeOptional: order.includeOptional === true,
     ...options,
     ref: orderId,
     settleOrders: true,
+    outputOn: completion,
     // Child settlements act on behalf of this order's meals: sibling child
     // orders pegged to other dinners keep their batches.
     ...(order.pegging ? { settlePegs: order.pegging } : {}),

@@ -118,6 +118,21 @@ test('duplicate suppliers and impossible slots are integrity problems', () => {
   assert.ok(issues.some((issue) => issue.includes('unknown slot "supper"')));
 });
 
+test('a negative lead time is an integrity problem', () => {
+  // Bought "minus two days out", the shop is scheduled after the dinner and
+  // the committed order arrives before it was placed.
+  const database = db([
+    purchased('flour', {
+      purchase: { supplierId: 'shop', packQty: 100, packUom: 'g', packPrice: 1, leadTimeDays: -2 },
+    }),
+  ]);
+  database.suppliers.push({ id: 'slowpost', name: 'Slow Post', leadTimeDays: Number.NaN });
+
+  const issues = validate(database);
+  assert.ok(issues.some((i) => i.includes('Item "flour" has an invalid leadTimeDays of -2')), JSON.stringify(issues));
+  assert.ok(issues.some((i) => i.includes('Supplier "slowpost" has an invalid leadTimeDays')));
+});
+
 test('a negative conversion coefficient is an integrity problem', () => {
   const database = db([
     purchased('oil', { stockUom: 'ml', densityGPerMl: -0.9 }),

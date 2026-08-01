@@ -18,6 +18,16 @@ import {
 } from '../src/engine/inventory.js';
 import { close, db, phantom, purchased } from './helpers.js';
 
+test('a lot of nothing is refused, not booked', () => {
+  // `stock add flour 0` used to print success while the pantry filtered the
+  // zero lot straight back out, leaving only a meaningless ledger receipt.
+  const database = db([purchased('flour')]);
+  assert.throws(() => receive(database, 'flour', { qty: 0, on: '2026-07-01' }), MiseError);
+  assert.throws(() => receive(database, 'flour', { qty: -5, on: '2026-07-01' }), MiseError);
+  assert.equal(database.lots.length, 0, 'nothing booked');
+  assert.equal(database.ledger.length, 0, 'nothing recorded');
+});
+
 function pantry() {
   return db([purchased('milk', { stockUom: 'ml', shelfLifeDays: 7 }), purchased('flour')]);
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
-import { onHand, onOrder, receive } from '../src/engine/inventory.js';
+import { availableOn, onHand, onOrder, receive } from '../src/engine/inventory.js';
 import { commitProduction, runMrp } from '../src/engine/mrp.js';
 import { bySupplier, packsFor, raisePurchaseOrders, receivePurchaseOrder, shoppingList } from '../src/engine/procurement.js';
 import { cookableNow, executeOrder, feasibility, prepSchedule, produce, raiseProductionOrder, serve } from '../src/engine/production.js';
@@ -860,6 +860,36 @@ test('serving planned meals one by one still cooks the committed batch once', ()
   assert.equal(second.shortages.length, 0, 'no unplanned shortage');
   assert.ok(close(onHand(database, 'dish'), 0), 'the banked half is eaten');
   assert.ok(close(onHand(database, 'sachet2'), 0), 'one making, one sachet');
+});
+
+test('a multi-day batch ages from its completion, not its start', () => {
+  const database = db(
+    [purchased('flour'), made('loaf2', { shelfLifeDays: 1 })],
+    [
+      recipe('loaf2', 1500, [{ itemId: 'flour', qty: 1000, uom: 'g' }], {
+        servings: 4,
+        // An overnight prove pushes the start back before the due date.
+        steps: [{ text: 'prove', activeMin: 30, passiveMin: 960 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-04', slot: 'dinner', itemId: 'loaf2', servings: 2 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-05', slot: 'dinner', itemId: 'loaf2', servings: 2 });
+  receive(database, 'flour', { qty: 5000, on: '2026-07-01' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const order = database.productionOrders.find((o) => o.itemId === 'loaf2')!;
+  assert.ok(close(order.qty, 1500), 'one merged batch: made for the 4th, it keeps to the 5th');
+  assert.ok(order.startOn < order.dueOn, 'the prove starts it days early');
+
+  // Executed on schedule, the loaf is *finished* on its due date and ages
+  // from there — dating it from the start would have it expire before the
+  // second dinner MRP merged into the batch.
+  executeOrder(database, order.id, { on: order.startOn });
+  const lot = database.lots.find((l) => l.itemId === 'loaf2')!;
+  assert.equal(lot.receivedOn, order.dueOn);
+  assert.equal(lot.expiresOn, '2026-07-05');
+  assert.ok(close(availableOn(database, 'loaf2', '2026-07-05'), 1500), 'still good for the second dinner');
 });
 
 test("serving a meal added later leaves other meals' commitments standing", () => {

@@ -148,6 +148,12 @@ export function receive(db: Database, itemId: ItemId, options: ReceiveOptions): 
   }
   const on = options.on ?? today();
   const qty = convert(options.qty, options.uom ?? item.stockUom, item.stockUom, conversionContext(item));
+  // A lot of nothing is not a lot: the pantry would filter it straight out,
+  // leaving a success message, a meaningless ledger receipt, and no stock.
+  // `!(qty > 0)` also catches NaN from a mangled quantity.
+  if (!(qty > 0)) {
+    throw new MiseError(`Cannot book ${qty} ${item.stockUom} of "${item.name}" into stock.`);
+  }
 
   const expiresOn =
     options.expiresOn ?? (item.shelfLifeDays !== undefined ? addDays(on, item.shelfLifeDays) : undefined);

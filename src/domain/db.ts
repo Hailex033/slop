@@ -255,6 +255,9 @@ export function validate(db: Database): string[] {
   for (const supplier of db.suppliers) {
     if (seenSupplierIds.has(supplier.id)) issues.push(`Duplicate supplier id "${supplier.id}".`);
     seenSupplierIds.add(supplier.id);
+    if (!Number.isFinite(supplier.leadTimeDays) || supplier.leadTimeDays < 0) {
+      issues.push(`Supplier "${supplier.id}" has an invalid leadTimeDays of ${supplier.leadTimeDays}.`);
+    }
   }
 
   const seenItemIds = new Set<ItemId>();
@@ -284,7 +287,7 @@ export function validate(db: Database): string[] {
       issues.push(`Purchased item "${item.id}" has no purchase info (supplier, pack, price).`);
     }
     if (item.purchase) {
-      const { packUom, packQty, packPrice, supplierId } = item.purchase;
+      const { packUom, packQty, packPrice, supplierId, leadTimeDays } = item.purchase;
       if (!isUomCode(packUom)) {
         issues.push(`Item "${item.id}" has unknown pack unit "${packUom}".`);
       } else if (!canConvert(packUom, item.stockUom, conversionContext(item))) {
@@ -295,6 +298,11 @@ export function validate(db: Database): string[] {
       }
       if (packQty <= 0) issues.push(`Item "${item.id}" has a non-positive pack quantity.`);
       if (packPrice < 0) issues.push(`Item "${item.id}" has a negative pack price.`);
+      // A negative lead time schedules the shop *after* the food is needed,
+      // and the committed order arrives before it was placed.
+      if (!Number.isFinite(leadTimeDays) || leadTimeDays < 0) {
+        issues.push(`Item "${item.id}" has an invalid leadTimeDays of ${leadTimeDays}.`);
+      }
       if (!findSupplier(db, supplierId)) {
         issues.push(`Item "${item.id}" references unknown supplier "${supplierId}".`);
       }
