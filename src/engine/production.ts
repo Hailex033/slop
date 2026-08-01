@@ -1003,6 +1003,11 @@ export function raiseProductionOrder(
       `"${item.name}" is ${item.sourcing} — only manufactured items can go on a production order.`,
     );
   }
+  // The same rule produce applies at execution, enforced before the order
+  // book holds a batch of nothing that doctor immediately calls invalid.
+  if (!Number.isFinite(qty) || qty <= 0) {
+    throw new MiseError(`Cannot raise an order for ${qty} ${item.stockUom} of "${item.name}".`);
+  }
   const order: ProductionOrder = {
     id: nextId('PRD', db.productionOrders),
     itemId,

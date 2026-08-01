@@ -1226,11 +1226,13 @@ const commands: Record<string, Command> = {
           { header: 'Item', get: (e) => findItem(ctx.db, e.itemId)?.name ?? `${e.itemId} (deleted)` },
           {
             header: 'Qty',
-            get: (e) =>
-              f.style(
-                `${e.qty > 0 ? '+' : ''}${f.qty(e.qty, mustItem(ctx.db, e.itemId).stockUom)}`,
-                e.qty > 0 ? 'green' : 'red',
-              ),
+            get: (e) => {
+              // The same tolerance as the Item column: history renders even
+              // when the master lost the item — bare number, no unit.
+              const uom = findItem(ctx.db, e.itemId)?.stockUom;
+              const amount = uom ? f.qty(e.qty, uom) : f.num(e.qty);
+              return f.style(`${e.qty > 0 ? '+' : ''}${amount}`, e.qty > 0 ? 'green' : 'red');
+            },
             align: 'right',
           },
           { header: 'Ref', get: (e) => f.style(e.ref ?? e.note ?? '', 'grey') },

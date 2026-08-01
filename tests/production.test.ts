@@ -438,6 +438,13 @@ test('production orders exist only for things that can be made', () => {
   // complete them: nothing to cook, or nothing that can enter stock.
   assert.throws(() => raiseProductionOrder(database, 'flour', 100, '2026-07-03'), /purchased/);
   assert.throws(() => raiseProductionOrder(database, 'mix2', 100, '2026-07-03'), /phantom/);
+
+  // And never for nothing: executeOrder could not cook it, and doctor
+  // would immediately call the book invalid.
+  database.items.push(made('loaf3'));
+  database.recipes.push(recipe('loaf3', 1000, [{ itemId: 'flour', qty: 600, uom: 'g' }]));
+  assert.throws(() => raiseProductionOrder(database, 'loaf3', 0, '2026-07-03'), /Cannot raise/);
+  assert.throws(() => raiseProductionOrder(database, 'loaf3', Number.NaN, '2026-07-03'), /Cannot raise/);
   assert.equal(database.productionOrders.length, 0);
 });
 
