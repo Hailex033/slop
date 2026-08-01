@@ -14,8 +14,9 @@
  * requirement. Without it you would order butter twice.
  */
 
-import { directParents, findItem, isMade, mustItem, recipeFor } from '../domain/db.js';
+import { conversionContext, directParents, findItem, isMade, mustItem, recipeFor } from '../domain/db.js';
 import { CycleError } from '../domain/errors.js';
+import { convert } from '../domain/units.js';
 import type { Database, ItemId, Recipe } from '../domain/types.js';
 
 export interface Cycle {
@@ -161,13 +162,42 @@ export function whereUsed(db: Database, itemId: ItemId, maxDepth = 12): WhereUse
     if (depth >= maxDepth || seen.has(id)) return node;
     const nextSeen = new Set(seen).add(id);
 
+    // One entry per parent recipe, whatever the line count: flour in the
+    // dough and flour for dusting is one relationship with a combined
+    // per-batch quantity, not the same parent printed twice at the first
+    // line's amount. (The used-by index lists a recipe once per line.)
+    const seenParents = new Set<string>();
     for (const parent of directParents(db, id)) {
-      const line = parent.components.find((c) => c.itemId === id);
+      if (seenParents.has(parent.id)) continue;
+      seenParents.add(parent.id);
+
+      const lines = parent.components.filter((c) => c.itemId === id);
+      let quantity: { qtyPerBatch: number; qtyUom: string } | undefined;
+      if (lines.length === 1) {
+        quantity = { qtyPerBatch: lines[0]!.qty, qtyUom: lines[0]!.uom };
+      } else if (lines.length > 1) {
+        if (lines.every((line) => line.uom === lines[0]!.uom)) {
+          quantity = {
+            qtyPerBatch: lines.reduce((sum, line) => sum + line.qty, 0),
+            qtyUom: lines[0]!.uom,
+          };
+        } else {
+          // Mixed units sum in the item's own stock unit.
+          quantity = {
+            qtyPerBatch: lines.reduce(
+              (sum, line) => sum + convert(line.qty, line.uom, item.stockUom, conversionContext(item)),
+              0,
+            ),
+            qtyUom: item.stockUom,
+          };
+        }
+      }
+
       const child = build(parent.outputItemId, depth + 1, nextSeen);
       node.children.push({
         ...child,
         viaRecipe: parent,
-        ...(line ? { qtyPerBatch: line.qty, qtyUom: line.uom } : {}),
+        ...(quantity ?? {}),
       });
     }
     node.children.sort((a, b) => a.name.localeCompare(b.name));

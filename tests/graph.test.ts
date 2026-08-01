@@ -83,6 +83,23 @@ test('validation catches dangling references and impossible conversions', () => 
   assert.ok(issues.some((issue) => issue.includes('densityGPerMl')));
 });
 
+test('where-used shows one entry per parent, lines combined', () => {
+  const database = db(
+    [purchased('flour'), made('sheets')],
+    [
+      recipe('sheets', 500, [
+        { itemId: 'flour', qty: 300, uom: 'g' },
+        { itemId: 'flour', qty: 50, uom: 'g', prep: 'for dusting' },
+      ]),
+    ],
+  );
+
+  const tree = whereUsed(database, 'flour');
+  assert.equal(tree.children.length, 1, 'two lines are still one parent');
+  assert.equal(tree.children[0]!.qtyPerBatch, 350, 'with the lines combined');
+  assert.equal(tree.children[0]!.qtyUom, 'g');
+});
+
 test('the shipped example database is internally consistent', () => {
   const database = seedDatabase();
   assert.deepEqual(validate(database), []);

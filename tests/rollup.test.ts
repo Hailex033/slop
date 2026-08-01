@@ -317,6 +317,26 @@ test('the example lasagne costs a plausible amount per serving', () => {
   assert.ok(report.perServing > 1 && report.perServing < 10, `got ${report.perServing}`);
 });
 
+test('a recipe hole is reported, not priced as free food', () => {
+  const database = db(
+    [purchased('flour'), made('bread')],
+    [
+      recipe('bread', 1000, [
+        { itemId: 'flour', qty: 600, uom: 'g' },
+        { itemId: 'ghost', qty: 100, uom: 'g' },
+      ]),
+    ],
+  );
+
+  const cost = costOf(database, 'bread', 1000, 'g');
+  assert.equal(cost.complete, false, 'a missing component cannot make a complete total');
+  assert.ok(cost.missing.includes('ghost'));
+
+  const facts = nutritionOf(database, 'bread', 1000, 'g');
+  assert.equal(facts.complete, false);
+  assert.ok(facts.missing.includes('ghost'));
+});
+
 test('the seven-level Escoffier chain costs out completely', () => {
   const database = seedDatabase();
   const report = costOf(database, 'chicken-chasseur', 1200, 'g');

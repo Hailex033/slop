@@ -134,6 +134,24 @@ test('a receipt that fails mid-order books nothing at all', () => {
   assert.equal(order.status, 'open', 'so the order can be corrected and received exactly once');
 });
 
+test('a free item is priced at zero, not flagged as unpriced', () => {
+  const database = nestedDb();
+  // The seeded sourdough starter's shape: a standing item replenished for
+  // nothing, with a genuine £0 pack price.
+  database.items.push({
+    id: 'starter', name: 'starter', category: 'Test', sourcing: 'purchased', stockUom: 'g',
+    purchase: { supplierId: 'shop', packQty: 100, packUom: 'g', packPrice: 0, leadTimeDays: 0 },
+  });
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'starter', servings: 100 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const line = list.lines.find((l) => l.itemId === 'starter')!;
+
+  assert.equal(line.problem, undefined, 'free is a price, not a missing one');
+  assert.equal(line.lineCost, 0);
+  assert.deepEqual(list.unresolved, []);
+});
+
 test('two visits to the same supplier are two trips on the shopping list', () => {
   const database = nestedDb();
   database.items = database.items.map((item) =>

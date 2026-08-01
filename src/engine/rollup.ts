@@ -208,7 +208,12 @@ export function costOf(
     for (const component of recipe.components) {
       if (component.optional && !includeOptional) continue;
       const child = findItem(db, component.itemId);
-      if (!child) continue;
+      if (!child) {
+        // A hole in the recipe is not free food. Production refuses to cook
+        // this; the report must not price it as if the line were absent.
+        missing.add(component.itemId);
+        continue;
+      }
       const scaled = component.scalable === false ? component.qty : component.qty * batches;
       const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));
       const gross = component.lossPct ? net / (1 - component.lossPct) : net;
@@ -342,7 +347,11 @@ function nutritionInner(
   for (const component of recipe.components) {
     if (component.optional && !includeOptional) continue;
     const child = findItem(db, component.itemId);
-    if (!child) continue;
+    if (!child) {
+      complete = false;
+      missing.add(component.itemId);
+      continue;
+    }
     const childRollup = nutritionInner(db, child.id, includeOptional, memo, nextSeen);
     if (!childRollup.complete) {
       complete = false;
@@ -430,7 +439,10 @@ export function nutritionOf(
     for (const component of currentRecipe.components) {
       if (component.optional && !includeOptional) continue;
       const child = findItem(db, component.itemId);
-      if (!child) continue;
+      if (!child) {
+        missing.add(component.itemId);
+        continue;
+      }
       const scaled = component.scalable === false ? component.qty : component.qty * batches;
       // Net, not gross: peel and trim are paid for but not eaten.
       const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));

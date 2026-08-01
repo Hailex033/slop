@@ -1149,7 +1149,11 @@ const commands: Record<string, Command> = {
       out(`  Pantry value       ${f.money(stockValue(ctx.db), currency)} across ${stockReport(ctx.db).length} items`);
       out(`  Planned meals      ${ctx.db.mealPlan.filter((e) => e.date >= today()).length} upcoming`);
       out(`  To buy             ${list.lines.length} lines, ${f.money(list.total, currency)}`);
-      out(`  To cook            ${mrp.production.length} batches`);
+      // Committed batches are supply to the planning run, not entries in
+      // mrp.production — but they are still outstanding cooking, exactly as
+      // the prep schedule shows them.
+      const openBatches = ctx.db.productionOrders.filter((order) => order.status === 'open').length;
+      out(`  To cook            ${mrp.production.length + openBatches} batches`);
       out(
         `  Expiring soon      ${soon.length > 0 ? f.style(String(soon.length), 'yellow') : f.style('none', 'green')}` +
           (soon.length > 0 ? f.style(` (${soon.map((s) => s.item.name).slice(0, 4).join(', ')})`, 'grey') : ''),

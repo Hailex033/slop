@@ -122,7 +122,8 @@ function toShoppingLine(
 ): ShoppingLine {
   const item = mustItem(db, planned.itemId);
   const { packs, packQty } = packsFor(db, planned.itemId, planned.qty);
-  const unitPrice = purchaseUnitCost(item) ?? 0;
+  const unitCost = purchaseUnitCost(item);
+  const unitPrice = unitCost ?? 0;
   const buyQty = packs * packQty;
   const supplier = item.purchase ? findSupplier(db, item.purchase.supplierId) : undefined;
 
@@ -130,9 +131,13 @@ function toShoppingLine(
     ...new Set(planned.pegging.map((id) => dishNames.get(id) ?? id).filter(Boolean)),
   ];
 
+  // Zero is a price — the seeded sourdough starter genuinely costs nothing
+  // to replenish. Only an *absent* or unusable price is a problem; using
+  // zero as the sentinel put a perfectly sourceable free item in the
+  // unresolved list.
   const problem = !item.purchase
     ? 'no supplier or pack size on file'
-    : unitPrice === 0
+    : unitCost === undefined || !Number.isFinite(unitCost)
       ? 'no price on file'
       : undefined;
 
