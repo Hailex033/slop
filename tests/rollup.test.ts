@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
 import { costOf, nutritionOf, purchaseUnitCost, rollupAllergens, rollupTime, rollupUnitCost } from '../src/engine/rollup.js';
+import { MiseError } from '../src/domain/errors.js';
 import { close, db, made, nestedDb, phantom, purchased, recipe } from './helpers.js';
 
 test('unit cost comes from the pack, in stock units', () => {
@@ -193,6 +194,38 @@ test('rollups exclude optional components by default, like everything else', () 
   // And the per-unit standard rate agrees with whichever view is asked for.
   assert.ok(close(rollupUnitCost(database, 'dish').total, 0.01, 1e-9));
   assert.ok(close(rollupUnitCost(database, 'dish', { includeOptional: true }).total, 0.02, 1e-9));
+});
+
+test('nothing costs nothing, fixed components included', () => {
+  const database = db(
+    [
+      purchased('base', { nutrientsPer100g: { kcal: 100, proteinG: 0, fatG: 0, carbG: 0 } }),
+      purchased('spice', { nutrientsPer100g: { kcal: 300, proteinG: 0, fatG: 0, carbG: 0 } }),
+      made('batch', { densityGPerMl: 1 }),
+    ],
+    [
+      recipe('batch', 100, [
+        { itemId: 'base', qty: 100, uom: 'g' },
+        // The pinch that does not shrink with the batch is exactly what made a
+        // zero-sized request cost something.
+        { itemId: 'spice', qty: 10, uom: 'g', scalable: false },
+      ]),
+    ],
+  );
+
+  const cost = costOf(database, 'batch', 0, 'g');
+  assert.equal(cost.total, 0);
+  assert.deepEqual(cost.lines, []);
+  assert.equal(nutritionOf(database, 'batch', 0, 'g').total.kcal, 0);
+
+  // A real quantity still charges the fixed pinch once.
+  assert.ok(close(costOf(database, 'batch', 100, 'g').total, 1.1, 1e-9));
+});
+
+test('a negative quantity is refused rather than costed', () => {
+  const database = nestedDb();
+  assert.throws(() => costOf(database, 'dish', -100, 'g'), MiseError);
+  assert.throws(() => nutritionOf(database, 'dish', -100, 'g'), MiseError);
 });
 
 test('allergens union across the whole tree, flagging optional-only paths', () => {

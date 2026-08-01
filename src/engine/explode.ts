@@ -24,7 +24,7 @@ import {
   mustItem,
   recipeFor,
 } from '../domain/db.js';
-import { CycleError } from '../domain/errors.js';
+import { CycleError, MiseError } from '../domain/errors.js';
 import { convert, type UomCode } from '../domain/units.js';
 import type { Component, Database, Item, ItemId, Recipe } from '../domain/types.js';
 
@@ -108,6 +108,9 @@ export function servingsForQuantity(db: Database, itemId: ItemId, qty: number, u
 export function explode(db: Database, request: ExplodeRequest): BomNode {
   const { itemId, includeOptional = false, maxDepth = 16, stopAt } = request;
   const rootItem = mustItem(db, itemId);
+  if ((request.qty ?? 0) < 0 || (request.servings ?? 0) < 0) {
+    throw new MiseError(`Cannot explode a negative quantity of "${rootItem.name}".`);
+  }
 
   let qty: number;
   if (request.servings !== undefined) {
@@ -149,7 +152,10 @@ export function explode(db: Database, request: ExplodeRequest): BomNode {
     const recipe = isMade(item) ? recipeFor(db, item.id) : undefined;
     const stopped = Boolean(recipe) && (depth >= maxDepth || stopAt?.has(item.id) === true);
 
-    if (!recipe || stopped) {
+    // A requirement of nothing needs nothing. Expanding it would still emit the
+    // `scalable: false` lines at full size — a tree for 0 g of ragù listing two
+    // bay leaves — because those do not scale with the batch.
+    if (!recipe || stopped || grossQty <= 1e-9) {
       return { ...base, stopped, phantom: false, children: [] };
     }
 

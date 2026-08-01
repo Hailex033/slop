@@ -12,6 +12,7 @@
  */
 
 import { conversionContext, findItem, isMade, mustItem, recipeFor } from '../domain/db.js';
+import { MiseError } from '../domain/errors.js';
 import { convert, type UomCode } from '../domain/units.js';
 import type { Database, Item, ItemId, Nutrients, Recipe } from '../domain/types.js';
 
@@ -174,6 +175,7 @@ export function costOf(
 ): CostReport {
   const includeOptional = options.includeOptional === true;
   const item = mustItem(db, itemId);
+  if (qty < 0) throw new MiseError(`Cannot cost a negative quantity (${qty}) of "${item.name}".`);
   const inStock = convert(qty, uom ?? item.stockUom, item.stockUom, conversionContext(item));
 
   const leafTotals = new Map<ItemId, number>();
@@ -181,6 +183,9 @@ export function costOf(
   let overhead = 0;
 
   const walk = (id: ItemId, quantity: number, seen: ReadonlySet<ItemId>): void => {
+    // No food, no cost. Descending on a zero requirement would still charge
+    // the `scalable: false` components, which do not shrink with the batch.
+    if (quantity <= 1e-9) return;
     const current = mustItem(db, id);
     const recipe = isMade(current) && !seen.has(id) ? recipeFor(db, id) : undefined;
     if (!recipe) {
@@ -392,6 +397,7 @@ export function nutritionOf(
 ): NutritionFacts {
   const includeOptional = options.includeOptional === true;
   const item = mustItem(db, itemId);
+  if (qty < 0) throw new MiseError(`Cannot analyse a negative quantity (${qty}) of "${item.name}".`);
   const inStock = convert(qty, uom ?? item.stockUom, item.stockUom, conversionContext(item));
   const recipe = recipeFor(db, itemId);
 
@@ -399,6 +405,8 @@ export function nutritionOf(
   const missing = new Set<ItemId>();
 
   const walk = (id: ItemId, quantity: number, seen: ReadonlySet<ItemId>): void => {
+    // Nothing eaten, nothing to count — including the fixed components.
+    if (quantity <= 1e-9) return;
     const current = mustItem(db, id);
     const currentRecipe = isMade(current) && !seen.has(id) ? recipeFor(db, id) : undefined;
 

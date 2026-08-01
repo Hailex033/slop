@@ -74,6 +74,16 @@ const SHORT: Record<string, string> = {
   h: 'horizon',
 };
 
+/**
+ * A token that can serve as a flag's value: anything that is not another flag.
+ * Negative numbers count — `-q -5` should reach the parser and be rejected
+ * there, rather than being silently dropped and the command quietly doing
+ * something else.
+ */
+function isValue(token: string | undefined): token is string {
+  return token !== undefined && (!token.startsWith('-') || /^-\d/.test(token));
+}
+
 function parseArgs(argv: readonly string[]): Args {
   const positionals: string[] = [];
   const flags: Record<string, string | boolean> = {};
@@ -85,20 +95,16 @@ function parseArgs(argv: readonly string[]): Args {
       const key = rawKey!;
       if (inlineValue !== undefined) {
         flags[key] = inlineValue;
+      } else if (isValue(argv[i + 1])) {
+        flags[key] = argv[i + 1]!;
+        i += 1;
       } else {
-        const next = argv[i + 1];
-        if (next !== undefined && !next.startsWith('-')) {
-          flags[key] = next;
-          i += 1;
-        } else {
-          flags[key] = true;
-        }
+        flags[key] = true;
       }
     } else if (token.startsWith('-') && token.length > 1 && !/^-\d/.test(token)) {
       const key = SHORT[token.slice(1)] ?? token.slice(1);
-      const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith('-')) {
-        flags[key] = next;
+      if (isValue(argv[i + 1])) {
+        flags[key] = argv[i + 1]!;
         i += 1;
       } else {
         flags[key] = true;

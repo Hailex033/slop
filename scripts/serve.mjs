@@ -25,7 +25,19 @@ const TYPES = {
 
 const server = createServer((request, response) => {
   const url = new URL(request.url ?? '/', `http://${request.headers.host}`);
-  const requested = url.pathname === '/' ? '/web/index.html' : decodeURIComponent(url.pathname);
+
+  // `decodeURIComponent` throws on a malformed escape like `/%ZZ`, and an
+  // exception thrown out of this callback is an uncaught exception on the
+  // event loop — which takes the whole process down. One bad request should
+  // cost the client a 400, not everyone else the server.
+  let requested;
+  try {
+    requested = url.pathname === '/' ? '/web/index.html' : decodeURIComponent(url.pathname);
+  } catch {
+    response.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end('Bad request: malformed URL escape\n');
+    return;
+  }
 
   // Contain everything under the repository root.
   const target = resolve(ROOT, `.${normalize(requested)}`);

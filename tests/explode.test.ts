@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CycleError } from '../src/domain/errors.js';
+import { CycleError, MiseError } from '../src/domain/errors.js';
 import { seedDatabase } from '../src/data/seed.js';
 import { aggregate, aggregateAll, explode, flatten, quantityForServings } from '../src/engine/explode.js';
 import { close, db, made, nestedDb, phantom, purchased, recipe } from './helpers.js';
@@ -163,4 +163,27 @@ test('the shipped example database explodes four levels deep', () => {
 
   assert.ok(butter, 'butter should be reachable via lasagne > besciamella > roux');
   assert.equal(butter.depth, 3);
+});
+
+test('a zero requirement expands to nothing, fixed components included', () => {
+  const database = db(
+    [purchased('bay', { stockUom: 'ea', unitWeightG: 0.2 }), purchased('stock'), made('stew')],
+    [
+      recipe('stew', 1000, [
+        { itemId: 'bay', qty: 2, uom: 'ea', scalable: false },
+        { itemId: 'stock', qty: 500, uom: 'g' },
+      ]),
+    ],
+  );
+
+  const tree = explode(database, { itemId: 'stew', qty: 0, uom: 'g' });
+  assert.equal(tree.grossQty, 0);
+  assert.deepEqual(tree.children, [], 'no bay leaf for a stew nobody is making');
+  assert.deepEqual(aggregate(tree, { level: 'leaves' }), []);
+});
+
+test('a negative requirement is refused', () => {
+  const database = nestedDb();
+  assert.throws(() => explode(database, { itemId: 'dish', qty: -100, uom: 'g' }), MiseError);
+  assert.throws(() => explode(database, { itemId: 'dish', servings: -1 }), MiseError);
 });
