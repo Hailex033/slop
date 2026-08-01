@@ -133,6 +133,14 @@ function boolFlag(args: Args, name: string): boolean {
   return args.flags[name] === true || args.flags[name] === 'true';
 }
 
+// `mise tree lasagne | head` closes stdout early. That is the reader saying
+// "enough", not an error: exit quietly instead of dying with an EPIPE stack,
+// the way every other well-behaved CLI does.
+process.stdout.on('error', (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EPIPE') process.exit(0);
+  throw error;
+});
+
 const out = (line = ''): void => {
   process.stdout.write(`${line}\n`);
 };

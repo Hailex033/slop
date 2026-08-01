@@ -88,3 +88,20 @@ test('the shipped example database is internally consistent', () => {
   assert.deepEqual(validate(database), []);
   assert.deepEqual(findCycles(database), []);
 });
+
+test('all five mother sauces ship in the item master, each with a recipe', () => {
+  const database = seedDatabase();
+  // Escoffier's five: béchamel, velouté, espagnole, tomate, hollandaise.
+  for (const sauce of ['besciamella', 'veloute', 'espagnole', 'tomato-sauce', 'hollandaise']) {
+    assert.ok(database.items.some((item) => item.id === sauce), `${sauce} is missing`);
+    assert.ok(database.recipes.some((r) => r.outputItemId === sauce), `${sauce} has no recipe`);
+  }
+});
+
+test('low-level codes reach six in the expanded graph', () => {
+  const codes = lowLevelCodes(seedDatabase());
+  // Butter's deepest home is the espagnole's brown roux, five levels under
+  // the chasseur; carrot's is the mirepoix inside the brown stock, six.
+  assert.equal(codes.get('butter'), 5);
+  assert.equal(codes.get('carrot'), 6);
+});

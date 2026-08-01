@@ -613,6 +613,6 @@ test('the example week produces both a shopping list and a cook list', () => {
   assert.ok(result.production.length > 0);
   assert.deepEqual(result.problems, [], 'every item is sourceable');
 
-  // Butter is genuinely reachable five ways in that dataset; still one line.
+  // Butter is genuinely reachable nine ways in that dataset; still one line.
   assert.equal(result.lines.filter((line) => line.itemId === 'butter').length, 1);
 });

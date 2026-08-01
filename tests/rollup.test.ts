@@ -287,3 +287,17 @@ test('the example lasagne costs a plausible amount per serving', () => {
   assert.equal(report.servings, 6);
   assert.ok(report.perServing > 1 && report.perServing < 10, `got ${report.perServing}`);
 });
+
+test('the seven-level Escoffier chain costs out completely', () => {
+  const database = seedDatabase();
+  const report = costOf(database, 'chicken-chasseur', 1200, 'g');
+
+  assert.equal(report.complete, true, 'every leaf under the demi-glace has a price');
+  assert.equal(report.servings, 4);
+  assert.ok(report.perServing > 1 && report.perServing < 10, `got ${report.perServing}`);
+
+  // Allergens climb the whole chain: the sulphites are the wine in the pan
+  // sauce, the gluten and milk are the brown roux five levels down.
+  const allergens = rollupAllergens(database, 'chicken-chasseur').map((hit) => hit.allergen);
+  assert.deepEqual([...allergens].sort(), ['gluten', 'milk', 'sulphites']);
+});

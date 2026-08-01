@@ -165,6 +165,44 @@ test('the shipped example database explodes four levels deep', () => {
   assert.equal(butter.depth, 3);
 });
 
+test('the Escoffier chain explodes seven levels deep', () => {
+  const database = seedDatabase();
+  const nodes = flatten(explode(database, { itemId: 'chicken-chasseur', servings: 4 }));
+  const carrot = nodes.find((node) =>
+    node.path.join('>').includes('demi-glace>espagnole>brown-stock>mirepoix>carrot'),
+  );
+
+  assert.ok(carrot, 'carrot is reachable via chasseur > sauce > demi-glace > espagnole > brown stock > mirepoix');
+  assert.equal(carrot.depth, 6);
+  // Butter twice under one dish: in the pan sauce, and in the espagnole's
+  // brown roux four levels further down.
+  assert.equal(nodes.filter((node) => node.itemId === 'butter').length, 2);
+});
+
+test('mirepoix appears under both stocks and the espagnole, and is netted once', () => {
+  const database = seedDatabase();
+  const tree = explode(database, { itemId: 'chicken-chasseur', servings: 4 });
+  const mirepoix = flatten(tree).filter((node) => node.itemId === 'mirepoix');
+
+  // espagnole directly, espagnole's brown stock, and the demi-glace's own
+  // brown stock — three distinct paths through one phantom.
+  assert.equal(mirepoix.length, 3);
+  assert.ok(mirepoix.every((node) => node.phantom));
+
+  const carrot = aggregate(tree, { level: 'leaves' }).find((r) => r.itemId === 'carrot')!;
+  assert.equal(carrot.occurrences, 3, 'three appearances pool into one line');
+});
+
+test('a dish can be an ingredient of another dish', () => {
+  const database = seedDatabase();
+  const tree = explode(database, { itemId: 'eggs-benedict', servings: 4 });
+  const starter = flatten(tree).find((node) => node.path.join('>').includes('sourdough>levain>starter'));
+
+  assert.ok(starter, 'the benedict reaches the sourdough starter through the loaf it toasts');
+  const stocked = aggregate(tree, { level: 'stocked' }).map((r) => r.itemId);
+  assert.ok(stocked.includes('sourdough'), 'the loaf is stockable — bake once, use twice');
+});
+
 test('a zero requirement expands to nothing, fixed components included', () => {
   const database = db(
     [purchased('bay', { stockUom: 'ea', unitWeightG: 0.2 }), purchased('stock'), made('stew')],

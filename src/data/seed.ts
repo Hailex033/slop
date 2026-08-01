@@ -3,19 +3,31 @@
  *
  * The dataset is chosen to exercise the parts of the engine that matter:
  *
- *  - **Depth.** Lasagne → béchamel → roux → butter is four levels. Nothing in
- *    the engine knows the number four.
- *  - **Sharing.** Roux appears under both the béchamel and the velouté;
- *    soffritto under both the ragù and the minestrone; chicken stock under the
- *    velouté and the minestrone. Butter is reachable by five distinct paths.
- *    Aggregation has to pool all of them, and MRP has to net them once.
- *  - **Phantoms.** Nobody keeps a tub of soffritto. It is a real sub-recipe with
- *    real structure that is never stocked and never ordered.
+ *  - **Depth.** Lasagne → béchamel → roux → butter is four levels. The
+ *    Escoffier chain goes deeper: chicken chasseur → sauce chasseur →
+ *    demi-glace → espagnole → brown stock → mirepoix → carrot is seven.
+ *    Nothing in the engine knows either number.
+ *  - **Sharing.** Roux thickens three of the mother sauces; mirepoix sits
+ *    under both stocks and the espagnole; soffritto under both the ragù and
+ *    the minestrone. Butter is reachable by nine distinct paths. Aggregation
+ *    has to pool all of them, and MRP has to net each item once.
+ *  - **Phantoms.** Nobody keeps a tub of soffritto, a jug of hollandaise, or
+ *    yesterday's poolish. They are real sub-recipes with real structure that
+ *    are never stocked and never ordered.
  *  - **Loss and fixed lines.** Onions are peeled; the bay leaf does not double
  *    when the batch does.
+ *  - **Dishes feeding dishes.** The eggs Benedict toasts slices of the same
+ *    sourdough the plan already bakes — a finished good as a component.
+ *
+ * The definitions are battle-tested rather than invented: Escoffier's five
+ * mother sauces (Le Guide Culinaire), Hazan's tomato sauce and her one-egg-
+ * per-100 g pasta ratio, Ruhlman's vinaigrette and mayonnaise ratios, the
+ * CIA's 2:1:1 mirepoix and stock method, Reinhart's poolish, a Tartine-style
+ * levain. Each recipe cites its source in `source`.
  *
  * Prices are plausible UK supermarket prices in GBP; nutrition is per 100 g
- * from standard reference values. Both are illustrative, not authoritative.
+ * from standard reference values (USDA FoodData Central and packaging).
+ * Both are illustrative, not authoritative.
  */
 
 import { addDays, today, type IsoDate } from '../domain/date.js';
@@ -80,6 +92,24 @@ const PURCHASED: Item[] = [
     purchase: { supplierId: 'super', packQty: 30, packUom: 'g', packPrice: 0.8, leadTimeDays: 0 },
     nutrientsPer100g: { kcal: 36, proteinG: 3, fatG: 0.8, satFatG: 0.1, carbG: 6.3, sugarG: 0.9, fibreG: 3.3, sodiumMg: 56 },
   },
+  {
+    id: 'mushroom', name: 'Chestnut mushrooms', category: 'Produce', sourcing: 'purchased', stockUom: 'g',
+    unitWeightG: 20, storage: 'fridge', shelfLifeDays: 5,
+    purchase: { supplierId: 'super', packQty: 250, packUom: 'g', packPrice: 1.15, leadTimeDays: 0 },
+    nutrientsPer100g: { kcal: 22, proteinG: 3.1, fatG: 0.3, satFatG: 0, carbG: 3.3, sugarG: 2, fibreG: 1, sodiumMg: 5 },
+  },
+  {
+    id: 'basil', name: 'Basil', category: 'Produce', sourcing: 'purchased', stockUom: 'g',
+    storage: 'fridge', shelfLifeDays: 5,
+    purchase: { supplierId: 'super', packQty: 30, packUom: 'g', packPrice: 0.8, leadTimeDays: 0 },
+    nutrientsPer100g: { kcal: 23, proteinG: 3.2, fatG: 0.6, satFatG: 0, carbG: 2.7, sugarG: 0.3, fibreG: 1.6, sodiumMg: 4 },
+  },
+  {
+    id: 'lemon', name: 'Lemon', category: 'Produce', sourcing: 'purchased', stockUom: 'ea',
+    unitWeightG: 100, storage: 'counter', shelfLifeDays: 21,
+    purchase: { supplierId: 'market', packQty: 4, packUom: 'ea', packPrice: 1.2, leadTimeDays: 0 },
+    nutrientsPer100g: { kcal: 29, proteinG: 1.1, fatG: 0.3, satFatG: 0, carbG: 9.3, sugarG: 2.5, fibreG: 2.8, sodiumMg: 2 },
+  },
 
   // ---- dairy & chilled ---------------------------------------------------
   {
@@ -117,6 +147,13 @@ const PURCHASED: Item[] = [
     purchase: { supplierId: 'super', packQty: 200, packUom: 'g', packPrice: 4.5, leadTimeDays: 0 },
     nutrientsPer100g: { kcal: 392, proteinG: 35.8, fatG: 25, satFatG: 16, carbG: 3.2, sugarG: 0.8, fibreG: 0, sodiumMg: 1600 },
   },
+  {
+    id: 'mozzarella', name: 'Mozzarella (fior di latte)', category: 'Dairy', sourcing: 'purchased', stockUom: 'g',
+    unitWeightG: 125, storage: 'fridge', shelfLifeDays: 7,
+    allergens: ['milk'],
+    purchase: { supplierId: 'super', packQty: 125, packUom: 'g', packPrice: 0.95, leadTimeDays: 0 },
+    nutrientsPer100g: { kcal: 280, proteinG: 18.1, fatG: 21, satFatG: 13.2, carbG: 3.1, sugarG: 1, fibreG: 0, sodiumMg: 500 },
+  },
 
   // ---- meat --------------------------------------------------------------
   {
@@ -148,6 +185,13 @@ const PURCHASED: Item[] = [
     storage: 'freezer', shelfLifeDays: 120,
     purchase: { supplierId: 'butcher', packQty: 1000, packUom: 'g', packPrice: 3.2, leadTimeDays: 1 },
     nutrientsPer100g: { kcal: 203, proteinG: 18.3, fatG: 14, satFatG: 3.9, carbG: 0, sugarG: 0, fibreG: 0, sodiumMg: 82 },
+  },
+  {
+    id: 'beef-bones', name: 'Beef bones (marrow and knuckle)', category: 'Meat', sourcing: 'purchased', stockUom: 'g',
+    storage: 'freezer', shelfLifeDays: 180,
+    purchase: { supplierId: 'butcher', packQty: 1500, packUom: 'g', packPrice: 2.25, leadTimeDays: 1 },
+    note: 'Sawn to order. Nutrition reflects what the simmer pulls out, roughly.',
+    nutrientsPer100g: { kcal: 120, proteinG: 10, fatG: 9, satFatG: 4, carbG: 0, sugarG: 0, fibreG: 0, sodiumMg: 50 },
   },
 
   // ---- store cupboard ----------------------------------------------------
@@ -209,6 +253,46 @@ const PURCHASED: Item[] = [
     allergens: ['sulphites'],
     purchase: { supplierId: 'super', packQty: 750, packUom: 'ml', packPrice: 7.0, leadTimeDays: 0 },
     nutrientsPer100g: { kcal: 85, proteinG: 0.1, fatG: 0, satFatG: 0, carbG: 2.6, sugarG: 0.6, fibreG: 0, sodiumMg: 4 },
+  },
+  {
+    id: 'white-wine', name: 'Dry white wine', category: 'Store cupboard', sourcing: 'purchased', stockUom: 'ml',
+    densityGPerMl: 0.99, storage: 'pantry', shelfLifeDays: 1000,
+    allergens: ['sulphites'],
+    purchase: { supplierId: 'super', packQty: 750, packUom: 'ml', packPrice: 5.5, leadTimeDays: 0 },
+    nutrientsPer100g: { kcal: 82, proteinG: 0.1, fatG: 0, satFatG: 0, carbG: 2.6, sugarG: 1, fibreG: 0, sodiumMg: 5 },
+  },
+  {
+    id: 'tomato-paste', name: 'Tomato paste', category: 'Store cupboard', sourcing: 'purchased', stockUom: 'g',
+    densityGPerMl: 1.1, storage: 'pantry', shelfLifeDays: 365,
+    purchase: { supplierId: 'super', packQty: 200, packUom: 'g', packPrice: 0.65, leadTimeDays: 0 },
+    nutrientsPer100g: { kcal: 82, proteinG: 4.3, fatG: 0.5, satFatG: 0.1, carbG: 19, sugarG: 12, fibreG: 4.1, sodiumMg: 59 },
+  },
+  {
+    id: 'red-wine-vinegar', name: 'Red wine vinegar', category: 'Store cupboard', sourcing: 'purchased', stockUom: 'ml',
+    densityGPerMl: 1.01, storage: 'pantry', shelfLifeDays: 1000,
+    allergens: ['sulphites'],
+    purchase: { supplierId: 'super', packQty: 350, packUom: 'ml', packPrice: 1.1, leadTimeDays: 0 },
+    nutrientsPer100g: { kcal: 19, proteinG: 0, fatG: 0, satFatG: 0, carbG: 0.3, sugarG: 0.3, fibreG: 0, sodiumMg: 8 },
+  },
+  {
+    id: 'dijon-mustard', name: 'Dijon mustard', category: 'Store cupboard', sourcing: 'purchased', stockUom: 'g',
+    densityGPerMl: 1.05, storage: 'fridge', shelfLifeDays: 540,
+    allergens: ['mustard'],
+    purchase: { supplierId: 'super', packQty: 185, packUom: 'g', packPrice: 1.35, leadTimeDays: 0 },
+    nutrientsPer100g: { kcal: 155, proteinG: 7.1, fatG: 11, satFatG: 0.6, carbG: 5.8, sugarG: 3, fibreG: 3.3, sodiumMg: 2700 },
+  },
+  {
+    id: 'sunflower-oil', name: 'Sunflower oil', category: 'Store cupboard', sourcing: 'purchased', stockUom: 'ml',
+    densityGPerMl: 0.92, storage: 'pantry', shelfLifeDays: 540,
+    purchase: { supplierId: 'super', packQty: 1, packUom: 'l', packPrice: 1.85, leadTimeDays: 0 },
+    note: 'The neutral oil — mayonnaise made on olive oil turns bitter.',
+    nutrientsPer100g: { kcal: 884, proteinG: 0, fatG: 100, satFatG: 10, carbG: 0, sugarG: 0, fibreG: 0, sodiumMg: 0 },
+  },
+  {
+    id: 'yeast', name: 'Instant dried yeast', category: 'Store cupboard', sourcing: 'purchased', stockUom: 'g',
+    densityGPerMl: 0.7, storage: 'pantry', shelfLifeDays: 365,
+    purchase: { supplierId: 'super', packQty: 56, packUom: 'g', packPrice: 1.2, leadTimeDays: 0 },
+    nutrientsPer100g: { kcal: 325, proteinG: 40, fatG: 7.6, satFatG: 1, carbG: 41, sugarG: 0, fibreG: 27, sodiumMg: 51 },
   },
   {
     id: 'salt', name: 'Fine sea salt', category: 'Store cupboard', sourcing: 'purchased', stockUom: 'g',
@@ -282,6 +366,26 @@ const MADE: Item[] = [
     densityGPerMl: 0.9,
   },
   {
+    id: 'mirepoix', name: 'Mirepoix', category: 'Sub-recipe', sourcing: 'phantom', stockUom: 'g',
+    densityGPerMl: 0.6,
+    note: 'The French cousin of the soffritto: 2:1:1, cut to match the simmer.',
+  },
+  {
+    id: 'poolish', name: 'Poolish', category: 'Sub-recipe', sourcing: 'phantom', stockUom: 'g',
+    densityGPerMl: 1.0,
+    note: 'Mixed the night before and used the next day — never held beyond that.',
+  },
+  {
+    id: 'hollandaise', name: 'Hollandaise', category: 'Sub-recipe', sourcing: 'phantom', stockUom: 'ml',
+    densityGPerMl: 0.95,
+    note: 'Made à la minute and held under an hour, which is exactly what a phantom is.',
+  },
+  {
+    id: 'sauce-chasseur', name: 'Sauce chasseur', category: 'Sub-recipe', sourcing: 'phantom', stockUom: 'ml',
+    densityGPerMl: 1.0,
+    note: 'Built in the pan the chicken browned in; never made ahead.',
+  },
+  {
     id: 'pasta-sheets', name: 'Fresh pasta sheets', category: 'Prepared', sourcing: 'manufactured', stockUom: 'g',
     storage: 'fridge', shelfLifeDays: 2,
   },
@@ -307,6 +411,39 @@ const MADE: Item[] = [
     densityGPerMl: 0.95, storage: 'fridge', shelfLifeDays: 3,
   },
   {
+    id: 'brown-stock', name: 'Brown beef stock', category: 'Prepared', sourcing: 'manufactured', stockUom: 'ml',
+    densityGPerMl: 1.0, storage: 'freezer', shelfLifeDays: 90,
+  },
+  {
+    id: 'espagnole', name: 'Sauce espagnole', category: 'Prepared', sourcing: 'manufactured', stockUom: 'ml',
+    densityGPerMl: 1.02, storage: 'fridge', shelfLifeDays: 4,
+  },
+  {
+    id: 'demi-glace', name: 'Demi-glace', category: 'Prepared', sourcing: 'manufactured', stockUom: 'ml',
+    densityGPerMl: 1.05, storage: 'freezer', shelfLifeDays: 180,
+    note: 'Frozen in ice-cube trays; one cube finishes a pan sauce.',
+  },
+  {
+    id: 'tomato-sauce', name: 'Tomato sauce (onion and butter)', category: 'Prepared', sourcing: 'manufactured', stockUom: 'g',
+    densityGPerMl: 1.05, storage: 'fridge', shelfLifeDays: 5,
+    note: 'Freezes well. The onion comes out at the end; nobody believes how good it is.',
+  },
+  {
+    id: 'pizza-dough', name: 'Pizza dough', category: 'Prepared', sourcing: 'manufactured', stockUom: 'g',
+    densityGPerMl: 0.8, storage: 'fridge', shelfLifeDays: 3,
+    note: 'Cold ferment improves it — day two is better than day one.',
+  },
+  {
+    id: 'vinaigrette', name: 'Vinaigrette', category: 'Prepared', sourcing: 'manufactured', stockUom: 'ml',
+    densityGPerMl: 0.94, storage: 'fridge', shelfLifeDays: 14,
+    note: 'A jar in the fridge door; shake before use.',
+  },
+  {
+    id: 'mayonnaise', name: 'Mayonnaise', category: 'Prepared', sourcing: 'manufactured', stockUom: 'g',
+    densityGPerMl: 0.91, storage: 'fridge', shelfLifeDays: 4,
+    note: 'Raw yolk: made in small batches and eaten inside the week.',
+  },
+  {
     id: 'lasagne', name: 'Lasagne al forno', category: 'Dish', sourcing: 'manufactured', stockUom: 'g',
     densityGPerMl: 1.0, storage: 'fridge', shelfLifeDays: 3,
   },
@@ -321,6 +458,28 @@ const MADE: Item[] = [
   {
     id: 'sourdough', name: 'Sourdough loaf', category: 'Dish', sourcing: 'manufactured', stockUom: 'g',
     densityGPerMl: 0.35, storage: 'counter', shelfLifeDays: 4,
+  },
+  {
+    id: 'chicken-chasseur', name: 'Chicken chasseur', category: 'Dish', sourcing: 'manufactured', stockUom: 'g',
+    densityGPerMl: 1.0, storage: 'fridge', shelfLifeDays: 3,
+  },
+  {
+    id: 'pizza-margherita', name: 'Pizza margherita', category: 'Dish', sourcing: 'manufactured', stockUom: 'g',
+    densityGPerMl: 0.9, storage: 'fridge', shelfLifeDays: 1,
+    note: 'Best eaten standing up, straight off the steel.',
+  },
+  {
+    id: 'leeks-vinaigrette', name: 'Leeks vinaigrette', category: 'Dish', sourcing: 'manufactured', stockUom: 'g',
+    densityGPerMl: 1.0, storage: 'fridge', shelfLifeDays: 2,
+  },
+  {
+    id: 'oeufs-mayo', name: 'Œufs mayonnaise', category: 'Dish', sourcing: 'manufactured', stockUom: 'g',
+    densityGPerMl: 1.0, storage: 'fridge', shelfLifeDays: 1,
+  },
+  {
+    id: 'eggs-benedict', name: 'Eggs Benedict', category: 'Dish', sourcing: 'manufactured', stockUom: 'g',
+    densityGPerMl: 0.95, storage: 'fridge', shelfLifeDays: 1,
+    note: 'Assembled to order; nothing about it keeps.',
   },
 ];
 
@@ -343,6 +502,7 @@ const RECIPES: Recipe[] = [
       { text: 'Dice the vegetables to an even 3 mm.', activeMin: 12 },
       { text: 'Sweat gently in the oil until soft and sweet, not coloured.', activeMin: 3, passiveMin: 15 },
     ],
+    source: 'The Italian battuto/soffritto as Marcella Hazan teaches it — onion, carrot, celery, patience.',
   },
   {
     id: 'r-roux',
@@ -355,7 +515,8 @@ const RECIPES: Recipe[] = [
       { itemId: 'flour', qty: 100, uom: 'g' },
     ],
     steps: [{ text: 'Melt the butter, stir in the flour, cook out for two minutes.', activeMin: 5 }],
-    note: 'Used by both the besciamella and the velouté — the shared node in this dataset.',
+    note: 'Thickens three mother sauces — besciamella, velouté, espagnole. The most shared node here.',
+    source: 'Escoffier, Le Guide Culinaire — equal weights butter and flour; colour decides which sauce it serves.',
   },
   {
     id: 'r-pasta-dough',
@@ -373,6 +534,7 @@ const RECIPES: Recipe[] = [
       { text: 'Bring to a smooth dough and knead.', activeMin: 10 },
       { text: 'Rest, wrapped, at room temperature.', passiveMin: 30 },
     ],
+    source: 'Marcella Hazan, Essentials of Classic Italian Cooking — one egg per 100 g of flour.',
   },
   {
     id: 'r-pasta-sheets',
@@ -431,6 +593,7 @@ const RECIPES: Recipe[] = [
       { text: 'Beat the warm milk into the roux a ladle at a time.', activeMin: 10 },
       { text: 'Simmer until it coats a spoon; season with nutmeg.', activeMin: 5, passiveMin: 5 },
     ],
+    source: 'Mother sauce — Escoffier\'s béchamel, by way of Artusi\'s balsamella.',
   },
   {
     id: 'r-chicken-stock',
@@ -441,9 +604,7 @@ const RECIPES: Recipe[] = [
     massYield: 0.6,
     components: [
       { itemId: 'chicken-wings', qty: 800, uom: 'g' },
-      { itemId: 'onion', qty: 150, uom: 'g', lossPct: 0.1 },
-      { itemId: 'carrot', qty: 100, uom: 'g', lossPct: 0.15 },
-      { itemId: 'celery', qty: 100, uom: 'g', lossPct: 0.1 },
+      { itemId: 'mirepoix', qty: 350, uom: 'g' },
       { itemId: 'bay-leaf', qty: 2, uom: 'ea', scalable: false },
       { itemId: 'thyme', qty: 2, uom: 'g', scalable: false, optional: true },
       { itemId: 'water', qty: 2.5, uom: 'l' },
@@ -453,6 +614,7 @@ const RECIPES: Recipe[] = [
       { text: 'Cover with cold water, bring to a bare tremble, skim.', activeMin: 10, passiveMin: 240 },
       { text: 'Strain, cool fast, freeze in 500 ml blocks.', activeMin: 10 },
     ],
+    source: 'Stock method per the CIA\'s The Professional Chef; wings for their gelatin, per McGee.',
   },
   {
     id: 'r-veloute',
@@ -468,6 +630,7 @@ const RECIPES: Recipe[] = [
       { itemId: 'pepper', qty: 0.5, uom: 'g' },
     ],
     steps: [{ text: 'Whisk the hot stock into the roux, simmer, finish with cream.', activeMin: 12, passiveMin: 8 }],
+    source: 'Mother sauce — Escoffier\'s velouté: stock where the béchamel takes milk.',
   },
   {
     id: 'r-shortcrust',
@@ -486,6 +649,7 @@ const RECIPES: Recipe[] = [
       { text: 'Rub the butter into the flour to coarse crumbs.', activeMin: 8 },
       { text: 'Bring together with egg and water; chill.', activeMin: 4, passiveMin: 60 },
     ],
+    source: 'The standard British shortcrust — half fat to flour, egg to bind.',
   },
   {
     id: 'r-lasagne',
@@ -563,6 +727,7 @@ const RECIPES: Recipe[] = [
       { itemId: 'water', qty: 125, uom: 'ml' },
     ],
     steps: [{ text: 'Mix and leave until domed and just past peak.', activeMin: 3, passiveMin: 300 }],
+    source: 'A young levain off the standing starter, after Tartine Bread (Chad Robertson).',
   },
   {
     id: 'r-sourdough',
@@ -582,6 +747,320 @@ const RECIPES: Recipe[] = [
       { text: 'Shape and retard in the fridge overnight.', activeMin: 10, passiveMin: 720 },
       { text: 'Bake from cold, lid on 20 minutes, lid off 20 minutes.', activeMin: 5, passiveMin: 40 },
     ],
+    source: 'A Tartine-style country loaf, scaled to one boule — 75 % hydration including the levain.',
+  },
+
+  // ---- the Escoffier chain ------------------------------------------------
+  {
+    id: 'r-mirepoix',
+    outputItemId: 'mirepoix',
+    yieldQty: 400,
+    yieldUom: 'g',
+    servings: 4,
+    components: [
+      { itemId: 'onion', qty: 200, uom: 'g', lossPct: 0.1, prep: 'peeled, large dice' },
+      { itemId: 'carrot', qty: 100, uom: 'g', lossPct: 0.15, prep: 'large dice' },
+      { itemId: 'celery', qty: 100, uom: 'g', lossPct: 0.1, prep: 'large dice' },
+    ],
+    steps: [
+      { text: 'Cut everything to a size that matches the simmer — chunky for stock, fine for sauce.', activeMin: 8 },
+    ],
+    source: 'CIA, The Professional Chef — mirepoix: 2:1:1 onion, carrot, celery by weight.',
+  },
+  {
+    id: 'r-brown-stock',
+    outputItemId: 'brown-stock',
+    yieldQty: 2000,
+    yieldUom: 'ml',
+    servings: 8,
+    massYield: 0.55,
+    components: [
+      { itemId: 'beef-bones', qty: 2000, uom: 'g', prep: 'in fist-sized pieces' },
+      { itemId: 'mirepoix', qty: 400, uom: 'g' },
+      { itemId: 'tomato-paste', qty: 60, uom: 'g', prep: 'smeared on the bones for the last 15 minutes of roasting' },
+      { itemId: 'bay-leaf', qty: 2, uom: 'ea', scalable: false },
+      { itemId: 'thyme', qty: 2, uom: 'g', scalable: false, optional: true },
+      { itemId: 'water', qty: 4, uom: 'l' },
+    ],
+    steps: [
+      { text: 'Roast the bones at 220 °C until deeply browned all over.', activeMin: 10, passiveMin: 50 },
+      { text: 'Simmer — never boil — skimming; keep the bones covered.', activeMin: 15, passiveMin: 480 },
+      { text: 'Strain, chill fast, lift the fat cap once set.', activeMin: 15, passiveMin: 60 },
+    ],
+    source: 'Escoffier\'s estouffade by the CIA\'s method; the deep roast is browning flavour, per McGee.',
+  },
+  {
+    id: 'r-espagnole',
+    outputItemId: 'espagnole',
+    yieldQty: 1000,
+    yieldUom: 'ml',
+    servings: 8,
+    massYield: 0.8,
+    components: [
+      { itemId: 'roux', qty: 90, uom: 'g', prep: 'taken well past blond, to the colour of hazelnut' },
+      { itemId: 'brown-stock', qty: 1300, uom: 'ml' },
+      { itemId: 'mirepoix', qty: 150, uom: 'g', prep: 'sweated hard first' },
+      { itemId: 'tomato-paste', qty: 30, uom: 'g' },
+      { itemId: 'bay-leaf', qty: 1, uom: 'ea', scalable: false },
+    ],
+    steps: [
+      { text: 'Whisk the stock into the brown roux; add mirepoix and tomato.', activeMin: 12 },
+      { text: 'Simmer, skimming, until reduced and glossy; strain.', activeMin: 10, passiveMin: 90 },
+    ],
+    source: 'Mother sauce — Escoffier, Le Guide Culinaire: sauce espagnole, the brown mother.',
+  },
+  {
+    id: 'r-demi-glace',
+    outputItemId: 'demi-glace',
+    yieldQty: 500,
+    yieldUom: 'ml',
+    servings: 10,
+    massYield: 0.5,
+    components: [
+      { itemId: 'espagnole', qty: 500, uom: 'ml' },
+      { itemId: 'brown-stock', qty: 500, uom: 'ml' },
+    ],
+    steps: [
+      { text: 'Combine and reduce by half, skimming as it goes; strain and freeze in cubes.', activeMin: 10, passiveMin: 60 },
+    ],
+    source: 'Escoffier — demi-glace: espagnole and estouffade in equal parts, reduced by half.',
+  },
+  {
+    id: 'r-sauce-chasseur',
+    outputItemId: 'sauce-chasseur',
+    yieldQty: 400,
+    yieldUom: 'ml',
+    servings: 4,
+    massYield: 0.6,
+    components: [
+      { itemId: 'butter', qty: 25, uom: 'g' },
+      { itemId: 'mushroom', qty: 200, uom: 'g', lossPct: 0.05, prep: 'sliced' },
+      { itemId: 'white-wine', qty: 100, uom: 'ml' },
+      { itemId: 'demi-glace', qty: 250, uom: 'ml' },
+      { itemId: 'chopped-tomatoes', qty: 100, uom: 'g' },
+      { itemId: 'parsley', qty: 5, uom: 'g', scalable: false, optional: true, prep: 'chopped, off the heat' },
+    ],
+    steps: [
+      { text: 'Colour the mushrooms in the butter.', activeMin: 6 },
+      { text: 'Deglaze with the wine; reduce to almost nothing.', activeMin: 4, passiveMin: 4 },
+      { text: 'Add demi-glace and tomato; simmer to a sauce that coats.', activeMin: 5, passiveMin: 10 },
+    ],
+    source: 'Escoffier — sauce chasseur, the hunter\'s derivative of the espagnole.',
+  },
+  {
+    id: 'r-chicken-chasseur',
+    outputItemId: 'chicken-chasseur',
+    yieldQty: 1200,
+    yieldUom: 'g',
+    servings: 4,
+    massYield: 0.85,
+    components: [
+      { itemId: 'chicken-thigh', qty: 800, uom: 'g', prep: 'browned hard, skin side first' },
+      { itemId: 'sauce-chasseur', qty: 400, uom: 'ml' },
+      { itemId: 'olive-oil', qty: 1, uom: 'tbsp' },
+      { itemId: 'salt', qty: 1, uom: 'tsp' },
+      { itemId: 'pepper', qty: 0.5, uom: 'g' },
+    ],
+    steps: [
+      { text: 'Brown the chicken in batches; set aside while the sauce is built in the same pan.', activeMin: 12 },
+      { text: 'Return the chicken and braise gently until cooked through.', activeMin: 5, passiveMin: 25 },
+    ],
+    source: 'Poulet sauté chasseur — Escoffier, by way of every bistro since.',
+  },
+
+  // ---- the rest of the mother sauces --------------------------------------
+  {
+    id: 'r-tomato-sauce',
+    outputItemId: 'tomato-sauce',
+    yieldQty: 750,
+    yieldUom: 'g',
+    servings: 4,
+    massYield: 0.75,
+    components: [
+      { itemId: 'chopped-tomatoes', qty: 800, uom: 'g' },
+      { itemId: 'butter', qty: 70, uom: 'g' },
+      { itemId: 'onion', qty: 150, uom: 'g', lossPct: 0.1, prep: 'peeled and halved; fished out at the end' },
+      { itemId: 'salt', qty: 1, uom: 'tsp' },
+    ],
+    steps: [
+      { text: 'Everything into one pan at a gentle simmer, stirring now and then.', activeMin: 5, passiveMin: 45 },
+      { text: 'Discard the onion; taste for salt.', activeMin: 2 },
+    ],
+    source: 'Marcella Hazan, Essentials of Classic Italian Cooking — tomato sauce with onion and butter.',
+  },
+  {
+    id: 'r-hollandaise',
+    outputItemId: 'hollandaise',
+    yieldQty: 300,
+    yieldUom: 'ml',
+    servings: 4,
+    components: [
+      { itemId: 'butter', qty: 175, uom: 'g', prep: 'melted and warm' },
+      { itemId: 'egg', qty: 3, uom: 'ea', prep: 'yolks only — the whites keep for meringue' },
+      { itemId: 'lemon', qty: 0.5, uom: 'ea', prep: 'juiced' },
+      { itemId: 'water', qty: 15, uom: 'ml', prep: 'for the sabayon' },
+      { itemId: 'salt', qty: 0.25, uom: 'tsp', scalable: false },
+    ],
+    steps: [
+      { text: 'Whisk yolks and water over barely simmering water to a thick sabayon.', activeMin: 6 },
+      { text: 'Off the heat, the butter in a thin thread; season with lemon and salt.', activeMin: 6 },
+    ],
+    source: 'Mother sauce — hollandaise; sabayon method per the CIA\'s The Professional Chef.',
+  },
+
+  // ---- emulsions by ratio --------------------------------------------------
+  {
+    id: 'r-vinaigrette',
+    outputItemId: 'vinaigrette',
+    yieldQty: 200,
+    yieldUom: 'ml',
+    servings: 8,
+    components: [
+      { itemId: 'olive-oil', qty: 150, uom: 'ml' },
+      { itemId: 'red-wine-vinegar', qty: 50, uom: 'ml' },
+      { itemId: 'dijon-mustard', qty: 10, uom: 'g' },
+      { itemId: 'salt', qty: 0.25, uom: 'tsp' },
+      { itemId: 'pepper', qty: 0.3, uom: 'g' },
+    ],
+    steps: [
+      { text: 'Dissolve the salt in the vinegar, whisk in the mustard, then the oil.', activeMin: 4 },
+    ],
+    source: 'Michael Ruhlman, Ratio — vinaigrette: 3 parts oil, 1 part vinegar, mustard to hold it.',
+  },
+  {
+    id: 'r-mayonnaise',
+    outputItemId: 'mayonnaise',
+    yieldQty: 240,
+    yieldUom: 'g',
+    servings: 8,
+    components: [
+      { itemId: 'egg', qty: 1, uom: 'ea', prep: 'yolk only' },
+      { itemId: 'sunflower-oil', qty: 200, uom: 'ml' },
+      { itemId: 'dijon-mustard', qty: 5, uom: 'g' },
+      { itemId: 'lemon', qty: 0.25, uom: 'ea', prep: 'juiced' },
+      { itemId: 'salt', qty: 0.25, uom: 'tsp' },
+    ],
+    steps: [
+      { text: 'Whisk yolk, mustard and salt; oil drop by drop until it turns, then in a thread.', activeMin: 8 },
+      { text: 'Loosen with lemon juice to taste.', activeMin: 2 },
+    ],
+    source: 'Ruhlman\'s Ratio for the proportions; McGee for why one yolk can carry all that oil.',
+  },
+
+  // ---- bread by baker's percentage ----------------------------------------
+  {
+    id: 'r-poolish',
+    outputItemId: 'poolish',
+    yieldQty: 400,
+    yieldUom: 'g',
+    servings: 4,
+    components: [
+      { itemId: 'bread-flour', qty: 200, uom: 'g' },
+      { itemId: 'water', qty: 200, uom: 'ml' },
+      { itemId: 'yeast', qty: 0.4, uom: 'g', prep: 'a pinch' },
+    ],
+    steps: [
+      { text: 'Stir to a batter, cover, leave overnight — ready when domed and just receding.', activeMin: 3, passiveMin: 780 },
+    ],
+    source: 'Peter Reinhart, The Bread Baker\'s Apprentice — poolish: equal flour and water, a whisper of yeast.',
+  },
+  {
+    id: 'r-pizza-dough',
+    outputItemId: 'pizza-dough',
+    yieldQty: 840,
+    yieldUom: 'g',
+    servings: 4,
+    components: [
+      { itemId: 'poolish', qty: 400, uom: 'g' },
+      { itemId: 'bread-flour', qty: 300, uom: 'g' },
+      { itemId: 'water', qty: 130, uom: 'ml' },
+      { itemId: 'salt', qty: 10, uom: 'g' },
+      { itemId: 'yeast', qty: 2, uom: 'g' },
+    ],
+    steps: [
+      { text: 'Mix and knead to smooth; bulk ferment an hour.', activeMin: 12, passiveMin: 60 },
+      { text: 'Divide into four balls; cold-ferment at least a day.', activeMin: 8, passiveMin: 1440 },
+    ],
+    source: 'Reinhart\'s method in baker\'s percentages: 66 % hydration, 2 % salt, half the flour pre-fermented.',
+  },
+
+  // ---- the new dishes -------------------------------------------------------
+  {
+    id: 'r-pizza-margherita',
+    outputItemId: 'pizza-margherita',
+    yieldQty: 900,
+    yieldUom: 'g',
+    servings: 4,
+    massYield: 0.85,
+    components: [
+      { itemId: 'pizza-dough', qty: 420, uom: 'g', prep: 'two balls' },
+      { itemId: 'tomato-sauce', qty: 160, uom: 'g', prep: 'spread thin' },
+      { itemId: 'mozzarella', qty: 250, uom: 'g', prep: 'torn and drained' },
+      { itemId: 'basil', qty: 8, uom: 'g', prep: 'leaves, after the oven' },
+      { itemId: 'olive-oil', qty: 1, uom: 'tbsp', prep: 'to finish' },
+    ],
+    steps: [
+      { text: 'Stretch each ball to 28 cm — knuckles, not rolling pin.', activeMin: 10 },
+      { text: 'Top and bake at the oven\'s maximum on a preheated steel.', activeMin: 8, passiveMin: 10 },
+      { text: 'Basil and a thread of oil off the heat.', activeMin: 2 },
+    ],
+    source: 'Toppings per the AVPN disciplinare for the margherita, domesticated for a home oven.',
+  },
+  {
+    id: 'r-leeks-vinaigrette',
+    outputItemId: 'leeks-vinaigrette',
+    yieldQty: 750,
+    yieldUom: 'g',
+    servings: 4,
+    massYield: 0.8,
+    components: [
+      { itemId: 'leek', qty: 800, uom: 'g', lossPct: 0.25, prep: 'trimmed to the pale part, halved, washed' },
+      { itemId: 'vinaigrette', qty: 80, uom: 'ml' },
+      { itemId: 'egg', qty: 1, uom: 'ea', scalable: false, prep: 'hard-boiled, grated over — the mimosa' },
+      { itemId: 'parsley', qty: 5, uom: 'g', optional: true, prep: 'chopped' },
+    ],
+    steps: [
+      { text: 'Poach the leeks until a knife meets no resistance; drain well.', activeMin: 8, passiveMin: 15 },
+      { text: 'Dress while warm; egg and parsley over the top.', activeMin: 5 },
+    ],
+    source: 'Poireaux vinaigrette — bistro canon.',
+  },
+  {
+    id: 'r-oeufs-mayo',
+    outputItemId: 'oeufs-mayo',
+    yieldQty: 470,
+    yieldUom: 'g',
+    servings: 4,
+    components: [
+      { itemId: 'egg', qty: 6, uom: 'ea', prep: 'boiled 8½ minutes — set white, fudgy centre' },
+      { itemId: 'mayonnaise', qty: 120, uom: 'g', prep: 'a proper coat, not a dab' },
+      { itemId: 'parsley', qty: 3, uom: 'g', optional: true },
+    ],
+    steps: [
+      { text: 'Boil, shock, peel; halve lengthways.', activeMin: 10, passiveMin: 9 },
+      { text: 'Coat generously with the mayonnaise.', activeMin: 3 },
+    ],
+    source: 'Œufs mayonnaise as the Parisian bistros serve it — the A.S.O.M. judges it annually.',
+  },
+  {
+    id: 'r-eggs-benedict',
+    outputItemId: 'eggs-benedict',
+    yieldQty: 950,
+    yieldUom: 'g',
+    servings: 4,
+    massYield: 0.95,
+    components: [
+      { itemId: 'sourdough', qty: 320, uom: 'g', prep: 'thick slices, toasted' },
+      { itemId: 'egg', qty: 8, uom: 'ea', prep: 'poached — two per person' },
+      { itemId: 'pancetta', qty: 120, uom: 'g', prep: 'crisped' },
+      { itemId: 'hollandaise', qty: 300, uom: 'ml' },
+    ],
+    steps: [
+      { text: 'Crisp the pancetta; toast the bread.', activeMin: 8 },
+      { text: 'Poach the eggs at a shiver, two at a time.', activeMin: 12 },
+      { text: 'Stack, nap with hollandaise, eat immediately.', activeMin: 5 },
+    ],
+    source: 'The Delmonico-era classic, on toasted sourdough in place of the muffin.',
   },
 ];
 
@@ -623,6 +1102,18 @@ const OPENING_STOCK: SeedLot[] = [
   // A block of stock in the freezer: MRP should net against this rather than
   // planning a five-hour stock-making session.
   { itemId: 'chicken-stock', qty: 1000, ageDays: 30, expiresInDays: 60, unitCost: 0.0021 },
+  // The expanded cupboard.
+  { itemId: 'mushroom', qty: 250, ageDays: 2, expiresInDays: 3, unitCost: 0.0046 },
+  { itemId: 'lemon', qty: 3, ageDays: 5, expiresInDays: 14, unitCost: 0.3 },
+  { itemId: 'dijon-mustard', qty: 150, ageDays: 90, unitCost: 0.0073 },
+  { itemId: 'red-wine-vinegar', qty: 300, ageDays: 120, unitCost: 0.0031 },
+  { itemId: 'sunflower-oil', qty: 700, ageDays: 30, unitCost: 0.00185 },
+  { itemId: 'yeast', qty: 45, ageDays: 60, unitCost: 0.0214 },
+  { itemId: 'tomato-paste', qty: 120, ageDays: 45, unitCost: 0.00325 },
+  { itemId: 'white-wine', qty: 400, ageDays: 10, unitCost: 0.00733 },
+  // Demi-glace cubes in the freezer: half of what the chasseur wants, so the
+  // plan nets them and cooks only the shortfall's worth of the deep chain.
+  { itemId: 'demi-glace', qty: 150, ageDays: 20, expiresInDays: 90, unitCost: 0.021 },
 ];
 
 export interface SeedOptions {
@@ -665,10 +1156,15 @@ export function seedDatabase(options: SeedOptions = {}): Database {
 
   const plan: Omit<MealPlanEntry, 'id'>[] = [
     { date: addDays(from, 1), slot: 'dinner', itemId: 'minestrone', servings: 4 },
+    { date: addDays(from, 2), slot: 'dinner', itemId: 'leeks-vinaigrette', servings: 6, note: 'starter — Ada’s parents' },
     { date: addDays(from, 2), slot: 'dinner', itemId: 'lasagne', servings: 6, note: 'Ada’s parents over' },
     { date: addDays(from, 3), slot: 'lunch', itemId: 'lasagne', servings: 2, note: 'leftovers' },
+    { date: addDays(from, 3), slot: 'dinner', itemId: 'chicken-chasseur', servings: 4 },
+    { date: addDays(from, 4), slot: 'lunch', itemId: 'oeufs-mayo', servings: 4 },
     { date: addDays(from, 4), slot: 'dinner', itemId: 'chicken-pie', servings: 4 },
     { date: addDays(from, 5), slot: 'breakfast', itemId: 'sourdough', servings: 4 },
+    { date: addDays(from, 5), slot: 'dinner', itemId: 'pizza-margherita', servings: 4 },
+    { date: addDays(from, 6), slot: 'breakfast', itemId: 'eggs-benedict', servings: 4, note: 'uses Friday’s loaf' },
     { date: addDays(from, 6), slot: 'dinner', itemId: 'minestrone', servings: 4 },
   ];
   db.mealPlan = plan.map((entry, index) => ({ ...entry, id: `MP-${String(index + 1).padStart(4, '0')}` }));

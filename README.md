@@ -36,16 +36,19 @@ Lasagne al forno              3 kg  1× batch
 └─ Parmigiano Reggiano       120 g
 ```
 
-Nothing in the engine knows that lasagne is four levels deep. It expands an
-item, finds some of its components are themselves items with recipes, and
-expands those. That is the whole trick, and everything else falls out of it.
+Nothing in the engine knows that lasagne is four levels deep — or that the
+seed's chicken chasseur is seven (chasseur → sauce chasseur → demi-glace →
+espagnole → brown stock → mirepoix → carrot, straight out of Escoffier). It
+expands an item, finds some of its components are themselves items with
+recipes, and expands those. That is the whole trick, and everything else
+falls out of it.
 
 ## Quick start
 
 ```bash
 npm install          # only @types/node and typescript, both dev-only
 npm run build
-npm test             # 156 tests, no runtime dependencies
+npm test             # 166 tests, no runtime dependencies
 
 node dist/src/cli.js init      # writes mise.db.json, seeded with a worked example
 node dist/src/cli.js tree lasagne
@@ -100,7 +103,7 @@ butter against your stock the first time you met it, decided you had enough, and
 then met it again with the stock already spoken for, you would buy it twice. MRP
 processes items strictly in low-level-code order, so every demand for an item is
 collected before that item is planned. In the seed data butter is reachable by
-five distinct paths and appears exactly once on the shopping list.
+nine distinct paths and appears exactly once on the shopping list.
 
 ## The same graph, read both ways
 
@@ -223,7 +226,7 @@ src/engine/       graph        low-level codes, cycles, where-used
 src/data/seed.ts  a worked example household
 src/cli.ts        the terminal front end
 web/              the browser front end, same engine
-tests/            156 tests
+tests/            166 tests
 ```
 
 The engine layer imports nothing from Node and nothing from npm, which is why
