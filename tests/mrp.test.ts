@@ -679,6 +679,26 @@ test('an overdue perishable order is supply for today, not for its past self', (
   assert.equal(result.production.filter((o) => o.itemId === 'sauce').length, 0, 'the open order covers it');
 });
 
+test('a plan with data problems refuses to be committed', () => {
+  const database = db(
+    [purchased('flour'), made('bread')],
+    [
+      recipe('bread', 1000, [
+        { itemId: 'flour', qty: 600, uom: 'g' },
+        { itemId: 'ghost', qty: 100, uom: 'g' },
+      ]),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'bread', servings: 1 });
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(result.problems.length > 0);
+
+  // Firming it would persist an order executeOrder refuses to cook, which
+  // then counts as supply and suppresses replanning of the broken dish.
+  assert.throws(() => commitProduction(database, result), /Cannot commit/);
+  assert.equal(database.productionOrders.length, 0);
+});
+
 test('an overdue order wants its ingredients today, not in the past', () => {
   const database = db(
     [purchased('tomato', { shelfLifeDays: 3 }), made('sauce')],

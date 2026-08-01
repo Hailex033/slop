@@ -62,7 +62,7 @@ export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
     else byDate.set(task.on, [task]);
   };
 
-  for (const planned of mrp.production) add(toPrepTask(db, planned));
+  for (const planned of mrp.production) add(toPrepTask(db, planned, mrp.includeOptional));
 
   // Committed batches are supply to the planning run, so they no longer
   // appear in `mrp.production` — but somebody still has to cook them.
@@ -77,7 +77,7 @@ export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
   for (const order of db.productionOrders) {
     if (order.status !== 'open') continue;
     if (order.startOn > horizonEnd) continue;
-    add(firmPrepTask(db, order, codes.get(order.itemId) ?? 0, mrp.asOf));
+    add(firmPrepTask(db, order, codes.get(order.itemId) ?? 0, mrp.asOf, mrp.includeOptional));
   }
 
   return [...byDate.entries()]
@@ -99,15 +99,20 @@ export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
  * hides the kneading starts the evening late. Stocked sub-recipes are their
  * own tasks and keep their own steps.
  */
-function stepsWithPhantoms(db: Database, itemId: ItemId, seen: ReadonlySet<ItemId> = new Set()): string[] {
+function stepsWithPhantoms(
+  db: Database,
+  itemId: ItemId,
+  includeOptional: boolean,
+  seen: ReadonlySet<ItemId> = new Set(),
+): string[] {
   const recipe = recipeFor(db, itemId);
   if (!recipe) return [];
   const steps: string[] = [];
   for (const component of recipe.components) {
-    if (component.optional) continue;
+    if (component.optional && !includeOptional) continue;
     const child = findItem(db, component.itemId);
     if (!child || isStocked(child) || seen.has(child.id)) continue;
-    const inner = stepsWithPhantoms(db, child.id, new Set(seen).add(itemId));
+    const inner = stepsWithPhantoms(db, child.id, includeOptional, new Set(seen).add(itemId));
     steps.push(...inner.map((text) => `${child.name}: ${text}`));
   }
   steps.push(...(recipe.steps ?? []).map((step) => step.text));
@@ -115,7 +120,7 @@ function stepsWithPhantoms(db: Database, itemId: ItemId, seen: ReadonlySet<ItemI
 }
 
 /** A prep task reconstructed from a firm order rather than a fresh plan. */
-function firmPrepTask(db: Database, order: ProductionOrder, level: number, earliest: IsoDate): PrepTask {
+function firmPrepTask(db: Database, order: ProductionOrder, level: number, earliest: IsoDate, includeOptional: boolean): PrepTask {
   const item = mustItem(db, order.itemId);
   const recipe = recipeFor(db, order.itemId);
   const batchQty = recipe
@@ -126,7 +131,7 @@ function firmPrepTask(db: Database, order: ProductionOrder, level: number, earli
   // scales with batches, unattended does not, and the phantoms this run
   // makes inline are on its clock.
   const minutes = recipe
-    ? runMinutesWithPhantoms(db, item, recipe, batches)
+    ? runMinutesWithPhantoms(db, item, recipe, batches, includeOptional)
     : { active: 0, passive: 0, total: 0 };
 
   return {
@@ -140,11 +145,11 @@ function firmPrepTask(db: Database, order: ProductionOrder, level: number, earli
     activeMin: minutes.active,
     passiveMin: minutes.passive,
     level,
-    steps: stepsWithPhantoms(db, order.itemId),
+    steps: stepsWithPhantoms(db, order.itemId, includeOptional),
   };
 }
 
-function toPrepTask(db: Database, planned: PlannedProduction): PrepTask {
+function toPrepTask(db: Database, planned: PlannedProduction, includeOptional: boolean): PrepTask {
   return {
     itemId: planned.itemId,
     name: planned.name,
@@ -159,7 +164,7 @@ function toPrepTask(db: Database, planned: PlannedProduction): PrepTask {
     activeMin: planned.activeMin,
     passiveMin: planned.passiveMin,
     level: planned.level,
-    steps: stepsWithPhantoms(db, planned.itemId),
+    steps: stepsWithPhantoms(db, planned.itemId, includeOptional),
   };
 }
 

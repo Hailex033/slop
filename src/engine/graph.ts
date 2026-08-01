@@ -149,8 +149,11 @@ export interface WhereUsedNode {
 /**
  * Reverse explosion: "if I throw out this jar of anchovies, what breaks?"
  * Walks upward from an item to every recipe that transitively depends on it.
+ * Unbounded by default — cycles are cut by the walk itself, so a fixed
+ * ceiling only hid the highest-level dishes; `maxDepth` remains an explicit
+ * opt-in for truncated views.
  */
-export function whereUsed(db: Database, itemId: ItemId, maxDepth = 12): WhereUsedNode {
+export function whereUsed(db: Database, itemId: ItemId, maxDepth = Number.POSITIVE_INFINITY): WhereUsedNode {
   const build = (id: ItemId, depth: number, seen: Set<ItemId>): WhereUsedNode => {
     const item = mustItem(db, id);
     const node: WhereUsedNode = {

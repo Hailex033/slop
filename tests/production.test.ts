@@ -582,6 +582,34 @@ test('committed batches stay on the prep schedule', () => {
   assert.ok(close(dish.qty, 1500), `got ${dish.qty}`);
 });
 
+test('optional phantom work counts when the plan includes it', () => {
+  const database = db(
+    [purchased('fruit'), phantom('syrup'), made('cake')],
+    [
+      recipe('syrup', 100, [{ itemId: 'fruit', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'reduce to a syrup', activeMin: 30 }],
+      }),
+      recipe('cake', 500, [
+        { itemId: 'fruit', qty: 300, uom: 'g' },
+        { itemId: 'syrup', qty: 100, uom: 'g', optional: true },
+      ], { steps: [{ text: 'bake', activeMin: 20 }] }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'cake', servings: 1 });
+
+  const plain = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.equal(plain.production[0]!.minutes, 20, 'without the flag the syrup stays out');
+
+  // With the flag the plan buys the syrup's fruit — so it must also
+  // schedule the syrup's making and show its step.
+  const rich = runMrp(database, { asOf: '2026-07-01', horizonDays: 7, includeOptional: true });
+  assert.equal(rich.production[0]!.minutes, 50);
+  const task = prepSchedule(database, rich)
+    .flatMap((day) => day.tasks)
+    .find((t) => t.itemId === 'cake')!;
+  assert.ok(task.steps.some((s) => s.includes('reduce to a syrup')));
+});
+
 test('a prep task lists the phantom steps it implies, in making order', () => {
   const database = db(
     [purchased('flour'), phantom('dough'), made('sheets')],

@@ -26,6 +26,7 @@ import {
   recipeFor,
 } from '../domain/db.js';
 import { addDays, daysBetween, maxDate, today, weekdayIndex, type IsoDate } from '../domain/date.js';
+import { MiseError } from '../domain/errors.js';
 import { nextId } from '../domain/ids.js';
 import { convert } from '../domain/units.js';
 import type { Database, Item, ItemId, MealPlanEntry, ProductionOrder } from '../domain/types.js';
@@ -106,6 +107,9 @@ export interface MrpLine {
 export interface MrpResult {
   readonly asOf: IsoDate;
   readonly horizonDays: number;
+  /** The optional-components choice this run was made with, so downstream
+   *  views (prep timing, steps) describe the same plan. */
+  readonly includeOptional: boolean;
   readonly lines: readonly MrpLine[];
   readonly purchases: readonly PlannedPurchase[];
   readonly production: readonly PlannedProduction[];
@@ -326,6 +330,7 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
           item,
           recipe,
           batches,
+          options.includeOptional === true,
         );
 
         // Backward-schedule against a usable cooking day. A four-hour braise
@@ -399,6 +404,7 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
   return {
     asOf,
     horizonDays,
+    includeOptional: options.includeOptional === true,
     lines: lines.sort((a, b) => a.level - b.level || a.name.localeCompare(b.name)),
     purchases: purchases.sort((a, b) => a.orderBy.localeCompare(b.orderBy) || a.name.localeCompare(b.name)),
     production: production.sort(
@@ -723,6 +729,16 @@ function explodeOneLevel(
  * needs pack rounding and supplier grouping first.
  */
 export function commitProduction(db: Database, result: MrpResult): ProductionOrder[] {
+  // A run with data problems planned around holes — a recipe referencing a
+  // deleted item, an unsourceable requirement. Firming it would persist
+  // orders executeOrder refuses to cook, which then count as supply and
+  // suppress replanning of the very dish that is broken. Fix the data, run
+  // again, then commit.
+  if (result.problems.length > 0) {
+    throw new MiseError(
+      `Cannot commit a plan with data problems:\n  - ${result.problems.join('\n  - ')}`,
+    );
+  }
   const created: ProductionOrder[] = [];
   for (const planned of result.production) {
     const order: ProductionOrder = {

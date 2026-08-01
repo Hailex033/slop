@@ -367,7 +367,11 @@ function nutritionInner(
   }
 
   const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
-  // Output mass: prefer a declared mass yield, else assume water loss only.
+  // Output mass. The declared yield is the ground truth — it already states
+  // the post-reduction quantity, which is what concentrates the per-100 g
+  // figures. `massYield` is the fallback for items whose output mass cannot
+  // be derived (no density, no unit weight); preferring it when both are
+  // known would contradict the very yield everything else scales by.
   const declaredGrams = gramsOf(item, batchQty);
   const outputGrams = declaredGrams ?? inputGrams * (recipe.massYield ?? 1);
 
@@ -580,6 +584,7 @@ export function runMinutesWithPhantoms(
   item: Item,
   recipe: Recipe,
   batches: number,
+  includeOptional = false,
   seen: ReadonlySet<ItemId> = new Set(),
 ): { active: number; passive: number; total: number } {
   const own = runMinutes(recipe, batches);
@@ -587,7 +592,9 @@ export function runMinutesWithPhantoms(
   let passive = own.passive;
 
   for (const component of recipe.components) {
-    if (component.optional) continue;
+    // The same toggle the plan used: an optional phantom whose ingredients
+    // were bought still has to be made, on this run's clock.
+    if (component.optional && !includeOptional) continue;
     const child = findItem(db, component.itemId);
     if (!child || isStocked(child) || seen.has(child.id)) continue;
     const childRecipe = recipeFor(db, child.id);
@@ -599,7 +606,14 @@ export function runMinutesWithPhantoms(
     const batchQty = convert(childRecipe.yieldQty, childRecipe.yieldUom, child.stockUom, conversionContext(child));
     const childBatches = batchQty === 0 ? 0 : grossed / batchQty;
 
-    const inner = runMinutesWithPhantoms(db, child, childRecipe, childBatches, new Set(seen).add(item.id));
+    const inner = runMinutesWithPhantoms(
+      db,
+      child,
+      childRecipe,
+      childBatches,
+      includeOptional,
+      new Set(seen).add(item.id),
+    );
     active += inner.active;
     passive += inner.passive;
   }

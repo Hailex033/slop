@@ -83,6 +83,29 @@ test('validation catches dangling references and impossible conversions', () => 
   assert.ok(issues.some((issue) => issue.includes('densityGPerMl')));
 });
 
+test('where-used climbs past any arbitrary ceiling', () => {
+  const items = [purchased('leaf')];
+  const recipes = [];
+  let prev = 'leaf';
+  for (let i = 0; i < 20; i += 1) {
+    const id = `level-${i}`;
+    items.push(made(id));
+    recipes.push(recipe(id, 100, [{ itemId: prev, qty: 100, uom: 'g' }]));
+    prev = id;
+  }
+  const database = db(items, recipes);
+
+  let node = whereUsed(database, 'leaf');
+  let depth = 0;
+  while (node.children.length > 0) {
+    node = node.children[0]!;
+    depth += 1;
+  }
+
+  assert.equal(depth, 20, 'the top-level dish twenty parents up is reached');
+  assert.equal(node.itemId, 'level-19');
+});
+
 test('two recipes for one item is an integrity problem, not a quiet last-wins', () => {
   const database = db(
     [purchased('flour'), made('bread')],

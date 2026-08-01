@@ -134,9 +134,15 @@ export interface Recipe {
   readonly components: readonly Component[];
   readonly steps?: readonly RecipeStep[];
   /**
-   * Mass retained after cooking, as a fraction. A sauce reduced by a third has
-   * `massYield: 0.67`. Water leaves, nutrients stay — so this concentrates the
-   * per-100 g nutrition without changing the totals.
+   * Mass retained after cooking, as a fraction of the input mass. A sauce
+   * reduced by a third has `massYield: 0.67`; a strained stock keeps only
+   * what passes the sieve.
+   *
+   * `yieldQty` is the ground truth for output — it already states the
+   * post-reduction quantity, and per-100 g nutrition concentrates through
+   * it. `massYield` is the *fallback* mass model, used when the output mass
+   * cannot be derived from the item (no density, no unit weight), and
+   * should agree with `yieldQty` over the recipe's input mass.
    */
   readonly massYield?: number;
   readonly source?: string;

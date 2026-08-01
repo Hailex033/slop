@@ -601,7 +601,9 @@ const RECIPES: Recipe[] = [
     yieldQty: 1500,
     yieldUom: 'ml',
     servings: 6,
-    massYield: 0.6,
+    // 1.5 l strained from ~3.7 kg in the pot: the wings and mirepoix stay
+    // in the sieve, so retention is well under half.
+    massYield: 0.4,
     components: [
       { itemId: 'chicken-wings', qty: 800, uom: 'g' },
       { itemId: 'mirepoix', qty: 350, uom: 'g' },
@@ -773,7 +775,8 @@ const RECIPES: Recipe[] = [
     yieldQty: 2000,
     yieldUom: 'ml',
     servings: 8,
-    massYield: 0.55,
+    // 2 l strained from ~6.5 kg of bones, mirepoix and water.
+    massYield: 0.3,
     components: [
       { itemId: 'beef-bones', qty: 2000, uom: 'g', prep: 'in fist-sized pieces' },
       { itemId: 'mirepoix', qty: 400, uom: 'g' },
