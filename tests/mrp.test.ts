@@ -27,6 +27,22 @@ test('a shared ingredient is netted exactly once, at its deepest level', () => {
   assert.ok(close(butter[0]!.net, 50), 'net of everything already in the house');
 });
 
+test('a meal fully served without its completion marker is history, not demand', () => {
+  const database = nestedDb();
+  // A hand-edit can record the count and never write the marker: four of
+  // four portions served, no servedOn. Nothing remains to plan for, and
+  // every reader — MRP here, the plan listings alongside — must agree the
+  // entry is done rather than show a zero-serving upcoming meal.
+  database.mealPlan.push({
+    id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 4, servedServings: 4,
+  });
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.equal(result.lines.length, 0, 'nothing to plan: the meal is already eaten');
+  assert.equal(result.production.length, 0);
+  assert.equal(result.purchases.length, 0);
+});
+
 test('phantoms pass demand straight through without being stocked or ordered', () => {
   const database = nestedDb();
   planned(database, 'dish', 4, '2026-07-02');

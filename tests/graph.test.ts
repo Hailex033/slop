@@ -423,12 +423,17 @@ test('imported enums, nutrients and ledger quantities are integrity-checked', ()
   database.ledger.push({
     id: 'TXN-BAD', at: '2026-07-01', type: 'adjust', itemId: 'flour', qty: 'oops' as never,
   });
+  // And an undated transaction renders as Invalid Date in the audit trail.
+  database.ledger.push({
+    id: 'TXN-BAD2', at: 'tomorrow' as never, type: 'adjust', itemId: 'flour', qty: 5,
+  });
 
   const issues = validate(database);
   assert.ok(issues.some((i) => i.includes('unknown sourcing "manufactued"')), JSON.stringify(issues));
   assert.ok(issues.some((i) => i.includes('invalid nutrient kcal')));
   assert.ok(issues.some((i) => i.includes('missing nutrient carbG')));
   assert.ok(issues.some((i) => i.includes('Ledger entry "TXN-BAD" has an invalid qty')));
+  assert.ok(issues.some((i) => i.includes('Ledger entry "TXN-BAD2" has an invalid date "tomorrow"')));
 });
 
 test('two recipes for one item is an integrity problem, not a quiet last-wins', () => {

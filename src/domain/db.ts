@@ -683,6 +683,11 @@ export function validate(db: Database): string[] {
     if (!Number.isFinite(txn.qty)) {
       issues.push(`Ledger entry "${txn.id}" has an invalid qty (${txn.qty}).`);
     }
+    // And it is dated or it is not an audit trail: "tomorrow" renders as
+    // Invalid Date in every report that shows the history.
+    if (!isIsoDate(txn.at)) {
+      issues.push(`Ledger entry "${txn.id}" has an invalid date "${txn.at}".`);
+    }
   }
 
   return issues;

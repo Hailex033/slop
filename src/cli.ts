@@ -757,11 +757,16 @@ const commands: Record<string, Command> = {
       // Same inclusive window as MRP: a 7-day horizon is today plus six, so
       // the plan shown here and the plan `mrp`/`shop`/`prep` act on agree
       // about which entries are in scope.
-      // The same predicate demandFromPlan uses: a fully served meal is
-      // history, and listing it in the upcoming count and food-cost total
-      // would disagree with the planning that already considers it done.
+      // The same predicate demandFromPlan uses: a meal with nothing left to
+      // serve is history — whether its completion marker was written or a
+      // hand-edit only recorded the count — and listing it in the upcoming
+      // count and food-cost total would disagree with the planning that
+      // already considers it done.
       const entries = ctx.db.mealPlan
-        .filter((entry) => !entry.servedOn && entry.date >= from && entry.date <= addDays(from, horizon - 1))
+        .filter(
+          (entry) =>
+            remainingServings(entry) > 1e-9 && entry.date >= from && entry.date <= addDays(from, horizon - 1),
+        )
         .sort((a, b) => a.date.localeCompare(b.date) || a.slot.localeCompare(b.slot));
 
       out(f.heading('Meal plan'));
