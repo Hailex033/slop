@@ -408,6 +408,29 @@ test('order quantities and dates are integrity-checked too', () => {
   assert.ok(issues.some((i) => i.includes('only manufactured items are made')));
 });
 
+test('imported enums, nutrients and ledger quantities are integrity-checked', () => {
+  const database = db([purchased('flour')]);
+  // A typo'd sourcing matches no branch: isMade() says buy, isStocked()
+  // says net, and MRP quietly routes a recipe-backed item to purchasing.
+  database.items.push({ ...purchased('mystery'), sourcing: 'manufactued' as never });
+  // One string nutrient turns every containing dish's calories to NaN; a
+  // missing required one does the same through undefined arithmetic.
+  database.items.push({
+    ...purchased('label'),
+    nutrientsPer100g: { kcal: 'oops', proteinG: 1, fatG: 1 } as never,
+  });
+  // A string qty crashes the ledger report's numeric formatter mid-table.
+  database.ledger.push({
+    id: 'TXN-BAD', at: '2026-07-01', type: 'adjust', itemId: 'flour', qty: 'oops' as never,
+  });
+
+  const issues = validate(database);
+  assert.ok(issues.some((i) => i.includes('unknown sourcing "manufactued"')), JSON.stringify(issues));
+  assert.ok(issues.some((i) => i.includes('invalid nutrient kcal')));
+  assert.ok(issues.some((i) => i.includes('missing nutrient carbG')));
+  assert.ok(issues.some((i) => i.includes('Ledger entry "TXN-BAD" has an invalid qty')));
+});
+
 test('two recipes for one item is an integrity problem, not a quiet last-wins', () => {
   const database = db(
     [purchased('flour'), made('bread')],

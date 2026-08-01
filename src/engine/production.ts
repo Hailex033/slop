@@ -635,40 +635,51 @@ function produceInner(
     let madeToOrder = false;
     const available = availableOn(db, child.id, on);
     if (available + 1e-9 < need && isMade(child) && cascade) {
-      let gap = need - available;
-      let sweptSpanDays = 0;
-      if (options.settleOrders === true) {
-        // A committed order is the making MRP planned: one run, one dose of
-        // every `scalable: false` input, however many meals share it.
-        // Cooking only this parent's share would leave the rest of the run
-        // to be cooked again for the next parent — a second dose of fixed
-        // inputs that were planned, and bought, once. Round the cascade up
-        // to the boundary of the last order it touches; the surplus is
-        // banked for the siblings the merged run was planned to feed.
-        const committed = committedMakeQty(db, child, gap, on, options.settlePegs);
-        gap = committed.qty;
-        sweptSpanDays = committed.spanDays;
+      const gap = need - available;
+      // A committed order is the making MRP planned: one run, one dose of
+      // every `scalable: false` input, however many meals share it. Cooking
+      // only this parent's share would leave the rest of the run to be
+      // cooked again for the next parent — a second dose of fixed inputs
+      // that were planned, and bought, once. Round the cascade up to the
+      // boundary of the last order it touches — the surplus is banked for
+      // the siblings the merged run was planned to feed — and cook each
+      // committed batch under the policy *it* was committed with, not this
+      // parent's: a plain parent executing first must not strip the
+      // garnish from a shared batch another dinner was promised with it.
+      // Only the uncommitted remainder is this parent's own making, under
+      // its own policy.
+      const makings =
+        options.settleOrders === true
+          ? cascadeMakings(db, child, gap, on, includeOptional, options.settlePegs)
+          : [{ qty: gap, includeOptional, spanDays: 0 }];
+      for (const making of makings) {
+        // The child books its own tub whatever frame asked for it: a phantom
+        // parent consumes *its* output immediately, but a stocked child under
+        // one is still issued from stock below, so its output must land there
+        // first — inheriting the flag would strand the fresh batch nowhere
+        // and fail that issue against an empty shelf.
+        const inner = produceInner(
+          db,
+          child.id,
+          making.qty,
+          { ...inherited, includeOptional: making.includeOptional, on, ref, consumeImmediately: false },
+          nextPath,
+        );
+        cascadedMinutes += inner.minutes;
+        shortages.push(...inner.shortages);
+        // A multi-day child made inline finishes days after this cook began,
+        // and everything above it waits: the dish cannot come out of the
+        // oven before the prove its cascade still owed has happened.
+        lagDays = Math.max(lagDays, making.spanDays + (inner.lagDays ?? 0));
+        // While a committed parent is being executed, cooking the gap inline
+        // has, in fact, executed the committed child order that stood for it.
+        // Left open, that order would be cooked again — duplicate stock —
+        // while MRP and prep kept counting a commitment already met. An ad-hoc
+        // cook is different: its sauce went into *this* dish, not into the
+        // future meal the order book is holding, so it settles nothing.
+        if (options.settleOrders === true) settleCommittedOrders(db, child.id, making.qty, options.settlePegs);
       }
-      // The child books its own tub whatever frame asked for it: a phantom
-      // parent consumes *its* output immediately, but a stocked child under
-      // one is still issued from stock below, so its output must land there
-      // first — inheriting the flag would strand the fresh batch nowhere
-      // and fail that issue against an empty shelf.
-      const inner = produceInner(db, child.id, gap, { ...inherited, on, ref, consumeImmediately: false }, nextPath);
-      cascadedMinutes += inner.minutes;
-      shortages.push(...inner.shortages);
-      // A multi-day child made inline finishes days after this cook began,
-      // and everything above it waits: the dish cannot come out of the
-      // oven before the prove its cascade still owed has happened.
-      lagDays = Math.max(lagDays, sweptSpanDays + (inner.lagDays ?? 0));
       madeToOrder = true;
-      // While a committed parent is being executed, cooking the gap inline
-      // has, in fact, executed the committed child order that stood for it.
-      // Left open, that order would be cooked again — duplicate stock —
-      // while MRP and prep kept counting a commitment already met. An ad-hoc
-      // cook is different: its sauce went into *this* dish, not into the
-      // future meal the order book is holding, so it settles nothing.
-      if (options.settleOrders === true) settleCommittedOrders(db, child.id, gap, options.settlePegs);
     }
 
     // `consumeImmediately` decides whether the *output* gets booked into stock.
@@ -968,32 +979,53 @@ function settleableOrders(db: Database, itemId: ItemId, pegs?: readonly string[]
 }
 
 /**
- * Round an inline making up to the boundary of the open committed orders it
- * touches: the committed run is the making unit, with one dose of every
- * `scalable: false` input, however many meals share it. Perishable orders
- * whose planned start is later than the cook date are left standing — the
- * shelf-life proof behind a merge is anchored at its planned start, and a
- * batch made early may not keep for the meals the proof promised.
+ * The makings of an inline cascade covering `gap`: the open committed
+ * orders it sweeps — rounded up to the boundary of the last order touched,
+ * each keeping the optional-components policy it was committed with — then
+ * any uncommitted remainder under the calling parent's own policy. The
+ * committed run is the making unit, with one dose of every
+ * `scalable: false` input, however many meals share it; adjacent
+ * same-policy segments merge because they are literally the same pot,
+ * while differently committed batches stay separate — a plain parent
+ * executing first must not cook a shared batch out of its garnish.
+ * `spanDays` is the longest planned making merged into a segment: a
+ * multi-day child cooked inline finishes that many days after it starts,
+ * and whatever consumes it must wait. Perishable orders whose planned
+ * start is later than the cook date are left standing — the shelf-life
+ * proof behind a merge is anchored at its planned start, and a batch made
+ * early may not keep for the meals the proof promised.
  */
-function committedMakeQty(
+function cascadeMakings(
   db: Database,
   item: Item,
   gap: number,
   on: IsoDate,
+  callerPolicy: boolean,
   pegs?: readonly string[],
-): { qty: number; spanDays: number } {
-  let boundary = 0;
-  let spanDays = 0;
+): { qty: number; includeOptional: boolean; spanDays: number }[] {
+  const makings: { qty: number; includeOptional: boolean; spanDays: number }[] = [];
+  const push = (qty: number, includeOptional: boolean, spanDays: number): void => {
+    const last = makings[makings.length - 1];
+    if (last && last.includeOptional === includeOptional) {
+      last.qty += qty;
+      last.spanDays = Math.max(last.spanDays, spanDays);
+    } else {
+      makings.push({ qty, includeOptional, spanDays });
+    }
+  };
+  let swept = 0;
   for (const order of settleableOrders(db, item.id, pegs)) {
-    if (boundary + 1e-9 >= gap) break;
+    if (swept + 1e-9 >= gap) break;
     if (item.shelfLifeDays !== undefined && on < order.startOn) break;
-    boundary += order.qty;
-    // The longest planned making among the swept orders: a multi-day child
-    // cooked inline finishes that many days after it starts, and whatever
-    // consumes it must wait.
-    spanDays = Math.max(spanDays, Math.max(0, daysBetween(order.startOn, order.dueOn)));
+    push(order.qty, order.includeOptional === true, Math.max(0, daysBetween(order.startOn, order.dueOn)));
+    swept += order.qty;
   }
-  return { qty: boundary > gap ? boundary : gap, spanDays };
+  const shy = gap - swept;
+  if (shy > 1e-9) push(shy, callerPolicy, 0);
+  // A sub-tolerance sliver is rounding noise, not a making of its own —
+  // fold it into the last batch so the cascade still covers the gap.
+  else if (shy > 0) makings[makings.length - 1]!.qty += shy;
+  return makings;
 }
 
 /**

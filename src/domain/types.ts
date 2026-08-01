@@ -30,7 +30,8 @@ export type LotId = string;
  *                   sub-recipe behaves when you never keep it around: you don't
  *                   have "soffritto" in the fridge, you have onions and carrots.
  */
-export type Sourcing = 'purchased' | 'manufactured' | 'phantom';
+export const SOURCINGS = ['purchased', 'manufactured', 'phantom'] as const;
+export type Sourcing = (typeof SOURCINGS)[number];
 
 export type Storage = 'pantry' | 'fridge' | 'freezer' | 'counter';
 

@@ -3,7 +3,7 @@
 import { NotFoundError, ValidationError } from './errors.js';
 import { canConvert, dimensionOf, isUomCode, type ConversionContext, type UomCode } from './units.js';
 import { isIsoDate } from './date.js';
-import { MEAL_SLOTS, ORDER_STATUSES } from './types.js';
+import { MEAL_SLOTS, ORDER_STATUSES, SOURCINGS } from './types.js';
 import type {
   Database,
   Item,
@@ -293,6 +293,14 @@ export function validate(db: Database): string[] {
       issues.push(`Item "${item.id}" has unknown stock unit "${item.stockUom}".`);
       continue;
     }
+    // Every make-or-buy decision switches on the three known sourcings, and
+    // a typo'd one ("manufactued") matches none of them: isMade() says buy,
+    // isStocked() says net, and MRP routes a recipe-backed shortage to
+    // purchasing — a spurious missing supplier, or worse, a stale purchase
+    // record buying the finished dish.
+    if (!(SOURCINGS as readonly string[]).includes(item.sourcing)) {
+      issues.push(`Item "${item.id}" has unknown sourcing "${item.sourcing}".`);
+    }
     // Conversion coefficients must be positive and finite: a negative
     // density converts a recipe line into a negative requirement, which the
     // whole engine reads as "needs nothing" — a dish planned and cooked
@@ -315,6 +323,26 @@ export function validate(db: Database): string[] {
     }
     if (item.safetyStock !== undefined && (!Number.isFinite(item.safetyStock) || item.safetyStock < 0)) {
       issues.push(`Item "${item.id}" has an invalid safetyStock of ${item.safetyStock}.`);
+    }
+    // NaN arithmetic is quiet: one "oops" kcal renders NaN calories on
+    // every dish containing the item, in a database doctor approved.
+    if (item.nutrientsPer100g) {
+      for (const [field, value, required] of [
+        ['kcal', item.nutrientsPer100g.kcal, true],
+        ['proteinG', item.nutrientsPer100g.proteinG, true],
+        ['fatG', item.nutrientsPer100g.fatG, true],
+        ['carbG', item.nutrientsPer100g.carbG, true],
+        ['satFatG', item.nutrientsPer100g.satFatG, false],
+        ['sugarG', item.nutrientsPer100g.sugarG, false],
+        ['fibreG', item.nutrientsPer100g.fibreG, false],
+        ['sodiumMg', item.nutrientsPer100g.sodiumMg, false],
+      ] as const) {
+        if (value === undefined) {
+          if (required) issues.push(`Item "${item.id}" is missing nutrient ${field} (per 100 g).`);
+        } else if (!Number.isFinite(value) || value < 0) {
+          issues.push(`Item "${item.id}" has an invalid nutrient ${field} of ${value}.`);
+        }
+      }
     }
     if (item.sourcing === 'purchased' && !item.purchase) {
       issues.push(`Purchased item "${item.id}" has no purchase info (supplier, pack, price).`);
@@ -647,6 +675,13 @@ export function validate(db: Database): string[] {
   for (const txn of db.ledger) {
     if (!findItem(db, txn.itemId)) {
       issues.push(`Ledger entry "${txn.id}" references unknown item "${txn.itemId}".`);
+    }
+    // The audit trail is rendered and reconciled as numbers: a string qty
+    // crashes the report's formatter mid-table, and NaN totals reconcile
+    // nothing. Sign is meaningful — issues are negative — so only
+    // finiteness is required.
+    if (!Number.isFinite(txn.qty)) {
+      issues.push(`Ledger entry "${txn.id}" has an invalid qty (${txn.qty}).`);
     }
   }
 

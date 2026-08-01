@@ -788,6 +788,43 @@ test('a merged child order is cooked whole on first use and banked for the rest'
   assert.equal(sauceLine.madeToOrder, false, 'the second dinner just opens the fridge');
 });
 
+test('a cascaded child batch keeps the policy it was committed with', () => {
+  const database = db(
+    [purchased('base'), purchased('garnish'), made('sauce'), made('dish')],
+    [
+      recipe('sauce', 1000, [
+        { itemId: 'base', qty: 1000, uom: 'g' },
+        { itemId: 'garnish', qty: 100, uom: 'g', optional: true },
+      ]),
+      recipe('dish', 1000, [{ itemId: 'sauce', qty: 500, uom: 'g' }]),
+    ],
+  );
+  receive(database, 'base', { qty: 5000, on: '2026-07-01' });
+  receive(database, 'garnish', { qty: 500, on: '2026-07-01' });
+  // The shared sauce batch was committed *with* its garnish (one of the
+  // dinners it feeds wants it); the executing dish order was committed
+  // plain. The batch belongs to its own commitment, not to whichever
+  // parent happens to execute first.
+  database.productionOrders.push({
+    id: 'PRD-SAUCE', itemId: 'sauce', qty: 1000, dueOn: '2026-07-03', startOn: '2026-07-03',
+    status: 'open', pegging: ['MP-1', 'MP-2'], includeOptional: true,
+  });
+  database.productionOrders.push({
+    id: 'PRD-DISH', itemId: 'dish', qty: 3000, dueOn: '2026-07-03', startOn: '2026-07-03',
+    status: 'open', pegging: ['MP-1'],
+  });
+
+  // The plain dish needs 1500 g of sauce. The committed 1000 g batch is
+  // swept and cooked with the garnish it was promised with; only the
+  // 500 g remainder is this parent's own plain making.
+  executeOrder(database, 'PRD-DISH', { on: '2026-07-03' });
+
+  assert.ok(close(onHand(database, 'garnish'), 400), `got ${onHand(database, 'garnish')}`);
+  assert.ok(close(onHand(database, 'base'), 3500), 'both makings drew their base');
+  assert.equal(database.productionOrders.find((o) => o.id === 'PRD-SAUCE')!.status, 'received');
+  assert.ok(close(onHand(database, 'sauce'), 0), 'made 1500, consumed 1500');
+});
+
 test('a merged run consumes its fixed inputs once, however many meals share it', () => {
   const database = nestedDb();
   // One sachet per making of sauce, however large the batch.
