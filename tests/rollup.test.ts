@@ -163,6 +163,25 @@ test('nutrition does not scale a fixed component with the batch', () => {
   assert.ok(close(nutritionOf(database, 'batch', 200, 'g').total.kcal, 300, 1e-9));
 });
 
+test('count-based output mass follows the batch walk, not a per-unit rate', () => {
+  const database = db(
+    [
+      purchased('meat2', { nutrientsPer100g: { kcal: 100, proteinG: 10, fatG: 5, carbG: 2 } }),
+      made('patty', { stockUom: 'ea' }),
+    ],
+    [recipe('patty', 1, [{ itemId: 'meat2', qty: 100, uom: 'g', scalable: false }], { yieldUom: 'ea' })],
+  );
+
+  // Two patties in one making still use one fixed 100 g of meat. With no
+  // gram conversion on the output, the mass must come from the same walk
+  // as the calories: 100 kcal over 100 g — not thinned across a phantom
+  // 200 g by a per-unit rate times the count.
+  const facts = nutritionOf(database, 'patty', 2, 'ea');
+  assert.ok(close(facts.total.kcal, 100, 1e-6), `got ${facts.total.kcal}`);
+  assert.ok(close(facts.grams, 100, 1e-6), `got ${facts.grams}`);
+  assert.ok(close(facts.per100g.kcal, 100, 1e-6), `got ${facts.per100g.kcal}`);
+});
+
 test('rollups exclude optional components by default, like everything else', () => {
   const database = db(
     [

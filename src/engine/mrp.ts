@@ -349,7 +349,20 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       // The order's own optional policy governs its components: a batch
       // committed with its garnish keeps demanding the garnish, whatever
       // flag this run happens to use.
-      explodeOneLevel(db, itemId, firm.qty, maxDate(asOf, firm.startOn), level, [firm.id], addDemand, firm.includeOptional === true, reportMissing);
+      // Component demand carries the order's own meal pegs when it has
+      // them, so the audit trail below a commitment still names the meals;
+      // a hand-raised order with no pegs stands for itself.
+      explodeOneLevel(
+        db,
+        itemId,
+        firm.qty,
+        maxDate(asOf, firm.startOn),
+        level,
+        firm.pegging && firm.pegging.length > 0 ? firm.pegging : [firm.id],
+        addDemand,
+        firm.includeOptional === true,
+        reportMissing,
+      );
     }
 
     if (net <= 1e-9) continue;
@@ -822,7 +835,10 @@ export function commitProduction(db: Database, result: MrpResult): ProductionOrd
       // runs and the eventual execution cook the batch that was planned —
       // including a policy inherited from the committed demand it replaces.
       includeOptional: planned.includeOptional ?? result.includeOptional,
-      ...(planned.pegging[0] ? { pegging: planned.pegging[0] } : {}),
+      // Every peg, not just the first: a merged run serving three meals
+      // keeps all three, so the shopping list can still answer "what is
+      // this for?" with the meals rather than an order id.
+      ...(planned.pegging.length > 0 ? { pegging: [...planned.pegging] } : {}),
     };
     created.push(order);
     db.productionOrders.push(order);

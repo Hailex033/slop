@@ -72,6 +72,20 @@ test('a missing database says how to make one', () => {
   });
 });
 
+test('a legacy single-peg order loads as a one-entry list', () => {
+  // The pegging field once held one source string; a merged run needs the
+  // whole list, and old files must lift cleanly into the new shape.
+  const database = normalizeDb({
+    productionOrders: [
+      {
+        id: 'PRD-1', itemId: 'x', qty: 1, dueOn: '2026-07-01', startOn: '2026-07-01', status: 'open',
+        pegging: 'MP-9',
+      } as never,
+    ],
+  });
+  assert.deepEqual(database.productionOrders[0]!.pegging, ['MP-9']);
+});
+
 test('normalising a partial database fills every collection, browser and CLI alike', () => {
   // The same function backs the CLI file store and the web localStorage
   // path, so a blob persisted before a collection existed still loads.

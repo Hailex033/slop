@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
 import { issue, receive } from '../src/engine/inventory.js';
 import { commitProduction, runMrp } from '../src/engine/mrp.js';
+import { shoppingList } from '../src/engine/procurement.js';
 import { close, db, made, nestedDb, phantom, purchased, recipe } from './helpers.js';
 
 function planned(database: ReturnType<typeof nestedDb>, itemId: string, servings: number, date: string) {
@@ -139,6 +140,24 @@ test('a committed optional policy survives replanning a stocked child', () => {
   const orders = commitProduction(database, rerun);
   const relishOrder = orders.find((o) => o.itemId === 'relish')!;
   assert.equal(relishOrder.includeOptional, true);
+});
+
+test('a firm order keeps every meal it was committed for on the trail', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'lunch', itemId: 'dish', servings: 2 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-05', slot: 'dinner', itemId: 'dish', servings: 2 });
+
+  const orders = commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const dishOrder = orders.find((o) => o.itemId === 'dish')!;
+  // The dish keeps, so both meals merged into one run — and both stay on
+  // the commitment, not just whichever happened to be first.
+  assert.deepEqual([...(dishOrder.pegging ?? [])].sort(), ['MP-1', 'MP-2']);
+
+  // The trail survives below the commit too: a later run's shopping list
+  // answers "what is this for?" with the dish, not with an order id.
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const butter = list.lines.find((line) => line.itemId === 'butter')!;
+  assert.deepEqual(butter.forDishes, ['dish'], JSON.stringify(butter.forDishes));
 });
 
 test('stock of a made sub-recipe stops it being made again', () => {

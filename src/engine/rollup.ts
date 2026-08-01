@@ -420,9 +420,15 @@ export function nutritionOf(
   let total = ZERO;
   const missing = new Set<ItemId>();
 
-  const walk = (id: ItemId, quantity: number, seen: ReadonlySet<ItemId>): void => {
+  // The walk returns the cooked mass of the subtree it was asked for, so
+  // the output-mass fallback below is computed by the same quantity-aware
+  // pass as the nutrients: a `scalable: false` component's mass is counted
+  // exactly as often as its calories. A per-unit rate times the quantity
+  // would halve the per-100 g figures of a two-batch run built on a fixed
+  // ingredient.
+  const walk = (id: ItemId, quantity: number, seen: ReadonlySet<ItemId>): number => {
     // Nothing eaten, nothing to count — including the fixed components.
-    if (quantity <= 1e-9) return;
+    if (quantity <= 1e-9) return 0;
     const current = mustItem(db, id);
     const currentRecipe = isMade(current) && !seen.has(id) ? recipeFor(db, id) : undefined;
 
@@ -431,7 +437,7 @@ export function nutritionOf(
       const per100 = current.nutrientsPer100g;
       if (per100 && grams !== undefined) total = addNutrients(total, per100, grams / 100);
       else missing.add(id);
-      return;
+      return grams ?? 0;
     }
 
     const nextSeen = new Set(seen).add(id);
@@ -443,6 +449,7 @@ export function nutritionOf(
     );
     const batches = batchQty === 0 ? 0 : quantity / batchQty;
 
+    let inputGrams = 0;
     for (const component of currentRecipe.components) {
       if (component.optional && !includeOptional) continue;
       const child = findItem(db, component.itemId);
@@ -453,15 +460,14 @@ export function nutritionOf(
       const scaled = component.scalable === false ? component.qty : component.qty * batches;
       // Net, not gross: peel and trim are paid for but not eaten.
       const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));
-      walk(child.id, net, nextSeen);
+      inputGrams += walk(child.id, net, nextSeen);
     }
-  };
-  walk(itemId, inStock, new Set());
 
-  // Output mass: prefer the item's own conversion, else fall back to the
-  // per-unit rollup, which knows about reduction.
-  const grams =
-    gramsOf(item, inStock) ?? rollupNutrition(db, itemId, options).gramsPerStockUnit * inStock;
+    // This sub-recipe's cooked mass: its own conversion when it has one,
+    // otherwise what went in less what the simmer boiled off.
+    return gramsOf(current, quantity) ?? inputGrams * (currentRecipe.massYield ?? 1);
+  };
+  const grams = walk(itemId, inStock, new Set());
   const servings = recipe
     ? (inStock /
         convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item))) *

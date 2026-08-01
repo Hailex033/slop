@@ -428,6 +428,41 @@ test('two visits to the same supplier are two trips on the shopping list', () =>
   assert.ok(groups.every((g) => g.supplier === 'Shop'));
 });
 
+test('two suppliers sharing a name are still two trips', () => {
+  const database = db(
+    [
+      purchased('ribeye', {
+        purchase: { supplierId: 'butcher-a', packQty: 500, packUom: 'g', packPrice: 12, leadTimeDays: 0 },
+      }),
+      purchased('sausage', {
+        purchase: { supplierId: 'butcher-b', packQty: 500, packUom: 'g', packPrice: 6, leadTimeDays: 0 },
+      }),
+      made('grill'),
+    ],
+    [
+      recipe('grill', 1000, [
+        { itemId: 'ribeye', qty: 500, uom: 'g' },
+        { itemId: 'sausage', qty: 500, uom: 'g' },
+      ]),
+    ],
+  );
+  database.suppliers.push(
+    { id: 'butcher-a', name: 'The Butcher', leadTimeDays: 0 },
+    { id: 'butcher-b', name: 'The Butcher', leadTimeDays: 0 },
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'grill', servings: 1 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const trips = bySupplier(list);
+
+  // One trading name, two shops: the heading can repeat, the visits cannot
+  // merge — the same split raisePurchaseOrders makes in the order book.
+  assert.equal(trips.length, 2, JSON.stringify(trips.map((t) => t.supplier)));
+  assert.deepEqual(trips.map((t) => t.supplierId).sort(), ['butcher-a', 'butcher-b']);
+  assert.ok(trips.every((t) => t.supplier === 'The Butcher'));
+  assert.equal(raisePurchaseOrders(database, list, '2026-07-01').length, 2, 'matching the order book');
+});
+
 test('one purchase order per trip, not per supplier', () => {
   const database = nestedDb();
   database.suppliers = [{ id: 'shop', name: 'Shop', leadTimeDays: 0 }];

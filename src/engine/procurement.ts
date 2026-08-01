@@ -171,6 +171,8 @@ function toShoppingLine(
 
 export interface ShoppingTrip {
   readonly supplier: string;
+  /** Present for sourced trips — the identity behind the display name. */
+  readonly supplierId?: SupplierId;
   /** The day this visit happens. Two Saturdays at the market are two trips. */
   readonly orderBy: IsoDate;
   readonly lines: ShoppingLine[];
@@ -185,20 +187,35 @@ export interface ShoppingTrip {
  * create an order for.
  */
 export function bySupplier(list: ShoppingList): ShoppingTrip[] {
-  const groups = new Map<string, { supplier: string; orderBy: IsoDate; lines: ShoppingLine[] }>();
+  const groups = new Map<string, { supplier: string; supplierId?: SupplierId; orderBy: IsoDate; lines: ShoppingLine[] }>();
   for (const line of list.lines) {
     const supplier = line.supplierName ?? 'Unsourced';
-    const key = `${supplier}@${line.orderBy}`;
+    // Keyed by *identity*, not display name: two shops both trading as
+    // "The Butcher" on the same Saturday are two visits — the same split
+    // raisePurchaseOrders makes when it turns the list into orders.
+    const key = `${line.supplierId ?? ''}@${line.orderBy}`;
     const group = groups.get(key);
     if (group) group.lines.push(line);
-    else groups.set(key, { supplier, orderBy: line.orderBy, lines: [line] });
+    else {
+      groups.set(key, {
+        supplier,
+        ...(line.supplierId ? { supplierId: line.supplierId } : {}),
+        orderBy: line.orderBy,
+        lines: [line],
+      });
+    }
   }
   return [...groups.values()]
     .map((group) => ({
       ...group,
       total: group.lines.reduce((sum, line) => sum + line.lineCost, 0),
     }))
-    .sort((a, b) => a.orderBy.localeCompare(b.orderBy) || a.supplier.localeCompare(b.supplier));
+    .sort(
+      (a, b) =>
+        a.orderBy.localeCompare(b.orderBy) ||
+        a.supplier.localeCompare(b.supplier) ||
+        (a.supplierId ?? '').localeCompare(b.supplierId ?? ''),
+    );
 }
 
 /**

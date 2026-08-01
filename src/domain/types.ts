@@ -258,8 +258,12 @@ export interface ProductionOrder {
   readonly dueOn: IsoDate;
   readonly startOn: IsoDate;
   status: OrderStatus;
-  /** The meal plan entry or parent order that created the demand. */
-  readonly pegging?: string;
+  /**
+   * Every meal plan entry (or parent order) whose demand this order covers.
+   * A merged run keeps all of its meals, so the audit trail can answer
+   * "what is this for?" completely rather than naming whichever came first.
+   */
+  readonly pegging?: readonly string[];
   /**
    * The optional-components policy of the run that committed this order.
    * Planning and execution both reuse it: a batch committed with its

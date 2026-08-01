@@ -157,11 +157,18 @@ export function directParents(db: Database, itemId: ItemId): readonly Recipe[] {
  */
 export function normalizeDb(parsed: Partial<Database>): Database {
   const base = emptyDb();
-  return {
+  const merged = {
     ...base,
     ...parsed,
     settings: { ...base.settings, ...(parsed.settings ?? {}) },
   } as Database;
+  // An earlier schema pegged an order to a single source string; lift it
+  // into today's list so those files keep loading with their trail intact.
+  merged.productionOrders = merged.productionOrders.map((order) => {
+    const peg = (order as { pegging?: unknown }).pegging;
+    return typeof peg === 'string' ? { ...order, pegging: [peg] } : order;
+  });
+  return merged;
 }
 
 /**
