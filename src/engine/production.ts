@@ -231,6 +231,7 @@ function netRequirements(
   balances: Map<ItemId, number>,
   shortfalls: Map<ItemId, number>,
   seen: ReadonlySet<ItemId> = new Set(),
+  includeOptional = false,
 ): number {
   if (qty <= 1e-9) return 0;
   const item = mustItem(db, itemId);
@@ -259,7 +260,7 @@ function netRequirements(
   // slowest branch, not the sum — the same rule `rollupTime` uses.
   let slowestBranch = 0;
   for (const component of recipe.components) {
-    if (component.optional) continue;
+    if (component.optional && !includeOptional) continue;
     const child = findItem(db, component.itemId);
     if (!child) {
       // A dangling reference is a hard shortfall: production refuses to cook
@@ -272,7 +273,10 @@ function netRequirements(
     const scaled = component.scalable === false ? component.qty : component.qty * batches;
     const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));
     const gross = component.lossPct ? net / (1 - component.lossPct) : net;
-    slowestBranch = Math.max(slowestBranch, netRequirements(db, child.id, gross, balances, shortfalls, nextSeen));
+    slowestBranch = Math.max(
+      slowestBranch,
+      netRequirements(db, child.id, gross, balances, shortfalls, nextSeen, includeOptional),
+    );
   }
 
   return runMinutes(recipe, batches).total + slowestBranch;
@@ -288,6 +292,7 @@ function shortfallsFor(
   servings: number,
   asOf: IsoDate,
   fromScratch = false,
+  includeOptional = false,
 ): { shortfalls: Map<ItemId, number>; minutes: number } {
   const shortfalls = new Map<ItemId, number>();
   const { qty } = quantityForServings(db, itemId, servings);
@@ -297,7 +302,7 @@ function shortfallsFor(
   // cooking we ignore any finished stock of the dish itself and price the job
   // from its ingredients.
   if (fromScratch) balances.delete(itemId);
-  const minutes = netRequirements(db, itemId, qty, balances, shortfalls);
+  const minutes = netRequirements(db, itemId, qty, balances, shortfalls, new Set(), includeOptional);
   return { shortfalls, minutes };
 }
 
@@ -314,9 +319,10 @@ function maxFeasibleServings(
   probe: number,
   asOf: IsoDate,
   fromScratch: boolean,
+  includeOptional = false,
 ): number {
   const ok = (servings: number): boolean =>
-    shortfallsFor(db, itemId, servings, asOf, fromScratch).shortfalls.size === 0;
+    shortfallsFor(db, itemId, servings, asOf, fromScratch, includeOptional).shortfalls.size === 0;
 
   let low = 0;
   let high = probe;
@@ -356,17 +362,26 @@ export function feasibility(
   targetServings?: number,
   asOf: IsoDate = today(),
   fromScratch = false,
+  includeOptional = false,
 ): Feasibility {
   const item = mustItem(db, itemId);
   const recipe = recipeFor(db, itemId);
   const probe = targetServings ?? recipe?.servings ?? 1;
 
-  const probed = shortfallsFor(db, itemId, probe, asOf, fromScratch);
+  const probed = shortfallsFor(db, itemId, probe, asOf, fromScratch, includeOptional);
   const shortfalls = probed.shortfalls;
   // The same walk against an empty pantry gives the denominator for coverage:
   // everything this dish needs, whether or not it happens to be in.
   const everything = new Map<ItemId, number>();
-  netRequirements(db, itemId, quantityForServings(db, itemId, probe).qty, new Map(), everything);
+  netRequirements(
+    db,
+    itemId,
+    quantityForServings(db, itemId, probe).qty,
+    new Map(),
+    everything,
+    new Set(),
+    includeOptional,
+  );
 
 
   const missing: Shortage[] = [...shortfalls.entries()].map(([shortId, short]) => {
@@ -381,7 +396,7 @@ export function feasibility(
     };
   });
 
-  const servings = maxFeasibleServings(db, itemId, probe, asOf, fromScratch);
+  const servings = maxFeasibleServings(db, itemId, probe, asOf, fromScratch, includeOptional);
   // The time answers for the servings on offer, not the probe: "you can make
   // forty" next to one batch's minutes is an invitation to a very long
   // evening. Only the cooking that actually remains counts — a stocked
@@ -389,7 +404,7 @@ export function feasibility(
   const minutes =
     Math.abs(servings - probe) < 1e-9
       ? probed.minutes
-      : shortfallsFor(db, itemId, servings, asOf, fromScratch).minutes;
+      : shortfallsFor(db, itemId, servings, asOf, fromScratch, includeOptional).minutes;
 
   return {
     itemId,

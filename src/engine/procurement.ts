@@ -363,7 +363,17 @@ export function receivePurchaseOrder(
         );
       }
       const qty = convert(line.packs * packQty, packUom, item.stockUom, conversionContext(item));
-      if (qty <= 0) continue;
+      // The same principle as the missing pack size above: a line that
+      // books nothing must not be skipped on the way to marking the whole
+      // order received — the inbound commitment would vanish without a
+      // lot, a ledger entry, or an error. `!(qty > 0)` also catches NaN
+      // from a hand-mangled packs count.
+      if (!(qty > 0)) {
+        throw new MiseError(
+          `Order "${order.id}" line for "${item.name}" works out to ` +
+            `${line.packs} × ${packQty} ${packUom} — nothing receivable; fix the line first.`,
+        );
+      }
 
       const lineCost = line.packs * line.unitPrice;
       cost += lineCost;

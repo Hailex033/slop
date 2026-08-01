@@ -10,6 +10,7 @@
 
 import {
   conversionContext,
+  findItem,
   findSupplier,
   householdServings,
   mustItem,
@@ -920,7 +921,7 @@ const commands: Record<string, Command> = {
   },
 
   cook: {
-    usage: 'mise cook <item> [-s servings] [--dry] [--force]',
+    usage: 'mise cook <item> [-s servings] [--dry] [--force] [--optional]',
     summary: 'Make something: issue the ingredients, book in the result.',
     group: 'planning',
     run: (ctx) => {
@@ -933,7 +934,14 @@ const commands: Record<string, Command> = {
         // always makes a new batch. Counting finished stock of the dish here
         // would say "everything is in the house" right before the actual
         // cook, which ignores that stock, fails for missing ingredients.
-        const check = feasibility(ctx.db, target.itemId, target.servings, undefined, true);
+        const check = feasibility(
+          ctx.db,
+          target.itemId,
+          target.servings,
+          undefined,
+          true,
+          boolFlag(ctx.args, 'optional'),
+        );
         out(f.heading(`Dry run — ${check.name} × ${f.num(target.servings)}`));
         out();
         out(`  Coverage: ${f.bar(check.coverage, 20)} ${f.percent(check.coverage)}`);
@@ -951,8 +959,12 @@ const commands: Record<string, Command> = {
         return;
       }
 
+      // The garnish the plan was shopped with must reach the pan: without
+      // this, `cook --optional` silently made the plain dish and left the
+      // bought extras on the shelf.
       const result = cook(ctx.db, target.itemId, target.servings, {
         allowShortages: boolFlag(ctx.args, 'force'),
+        includeOptional: boolFlag(ctx.args, 'optional'),
       });
       ctx.dirty = true;
 
@@ -983,7 +995,7 @@ const commands: Record<string, Command> = {
   },
 
   serve: {
-    usage: 'mise serve <item> [-s servings] [--force]',
+    usage: 'mise serve <item> [-s servings] [--force] [--optional]',
     summary: 'Eat it: cook if needed, then take it out of stock.',
     group: 'planning',
     run: (ctx) => {
@@ -994,7 +1006,10 @@ const commands: Record<string, Command> = {
       // empty pantry. Recording food as eaten that was never there corrupts
       // the ledger, the cost history and every future planning run.
       const force = boolFlag(ctx.args, 'force');
-      const result = serve(ctx.db, target.itemId, target.servings, { allowShortages: force });
+      const result = serve(ctx.db, target.itemId, target.servings, {
+        allowShortages: force,
+        includeOptional: boolFlag(ctx.args, 'optional'),
+      });
       ctx.dirty = true;
 
       if (result.shortages.length > 0) {
@@ -1192,7 +1207,10 @@ const commands: Record<string, Command> = {
           { header: 'Id', get: (e) => f.style(e.id, 'grey') },
           { header: 'Date', get: (e) => formatDate(e.at) },
           { header: 'Type', get: (e) => e.type },
-          { header: 'Item', get: (e) => mustItem(ctx.db, e.itemId).name },
+          // History outlives the item master: a deleted item's transactions
+          // still render, by id, instead of aborting the report that shows
+          // them. Doctor flags the dangling reference separately.
+          { header: 'Item', get: (e) => findItem(ctx.db, e.itemId)?.name ?? `${e.itemId} (deleted)` },
           {
             header: 'Qty',
             get: (e) =>

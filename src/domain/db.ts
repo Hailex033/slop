@@ -424,11 +424,28 @@ export function validate(db: Database): string[] {
       if (!findItem(db, line.itemId)) {
         issues.push(`Purchase order "${order.id}" has a line for unknown item "${line.itemId}".`);
       }
+      // A zero or negative line books nothing: receiving would either erase
+      // the commitment or refuse — either way the data needs fixing first.
+      if (!Number.isFinite(line.packs) || line.packs <= 0) {
+        issues.push(`Purchase order "${order.id}" has a line with invalid packs (${line.packs}).`);
+      }
+      if (line.packQty !== undefined && (!Number.isFinite(line.packQty) || line.packQty <= 0)) {
+        issues.push(`Purchase order "${order.id}" has a line with invalid packQty (${line.packQty}).`);
+      }
     }
   }
   for (const order of db.productionOrders) {
     if (!findItem(db, order.itemId)) {
       issues.push(`Production order "${order.id}" references unknown item "${order.itemId}".`);
+    }
+  }
+  // History references items too. The ledger is read-only, so a hole here
+  // cannot corrupt anything — but the report should render it by id rather
+  // than abort, and doctor should say the master lost something the books
+  // still mention.
+  for (const txn of db.ledger) {
+    if (!findItem(db, txn.itemId)) {
+      issues.push(`Ledger entry "${txn.id}" references unknown item "${txn.itemId}".`);
     }
   }
 

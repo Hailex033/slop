@@ -184,6 +184,23 @@ test('dates that are not dates are integrity problems too', () => {
   assert.ok(issues.some((issue) => issue.includes('invalid receivedOn date "2026-02-30"')));
 });
 
+test('history and order lines are integrity-checked too', () => {
+  const database = db([purchased('flour')]);
+  // A deleted item whose transactions survive: the ledger report renders it
+  // by id, and doctor must say the master lost something the books mention.
+  database.ledger.push({
+    id: 'TXN-1', at: '2026-07-01', type: 'receive', itemId: 'vanished', qty: 100, uom: 'g',
+  } as never);
+  database.purchaseOrders.push({
+    id: 'PO-1', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
+    lines: [{ itemId: 'flour', packs: 0, unitPrice: 1 }],
+  });
+
+  const issues = validate(database);
+  assert.ok(issues.some((i) => i.includes('Ledger entry "TXN-1"')), JSON.stringify(issues));
+  assert.ok(issues.some((i) => i.includes('invalid packs (0)')));
+});
+
 test('two recipes for one item is an integrity problem, not a quiet last-wins', () => {
   const database = db(
     [purchased('flour'), made('bread')],

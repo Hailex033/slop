@@ -428,6 +428,43 @@ test('two visits to the same supplier are two trips on the shopping list', () =>
   assert.ok(groups.every((g) => g.supplier === 'Shop'));
 });
 
+test('a zero-quantity order line blocks the receipt instead of vanishing', () => {
+  const database = db([purchased('flour')]);
+  database.purchaseOrders.push({
+    id: 'PO-1', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
+    lines: [{ itemId: 'flour', packs: 0, unitPrice: 1, packQty: 100, packUom: 'g' }],
+  });
+
+  // Skipping the line and marking the order received would erase the
+  // inbound commitment without a lot, a ledger entry, or an error.
+  assert.throws(() => receivePurchaseOrder(database, 'PO-1', '2026-07-02'), /nothing receivable/);
+  assert.equal(database.purchaseOrders[0]!.status, 'open', 'the commitment still stands');
+  assert.equal(database.lots.length, 0, 'and nothing was booked');
+});
+
+test('feasibility counts optional components only when asked', () => {
+  const database = db(
+    [purchased('polenta'), purchased('shavings'), made('board')],
+    [
+      recipe('board', 1000, [
+        { itemId: 'polenta', qty: 1000, uom: 'g' },
+        { itemId: 'shavings', qty: 50, uom: 'g', optional: true },
+      ]),
+    ],
+  );
+  receive(database, 'polenta', { qty: 1000, on: '2026-07-01' });
+
+  // Plain: fully coverable. With the flag — the same one the dry run and
+  // the cook now share — the missing garnish is reported, so `cook --dry
+  // --optional` predicts exactly what `cook --optional` will attempt.
+  assert.equal(feasibility(database, 'board', 1, '2026-07-02', true).missing.length, 0);
+  const withOptional = feasibility(database, 'board', 1, '2026-07-02', true, true);
+  assert.ok(
+    withOptional.missing.some((m) => m.itemId === 'shavings'),
+    JSON.stringify(withOptional.missing),
+  );
+});
+
 test('two suppliers sharing a name are still two trips', () => {
   const database = db(
     [
