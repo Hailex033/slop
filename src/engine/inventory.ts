@@ -311,6 +311,13 @@ export function adjust(
   newQty: number,
   on: IsoDate = today(),
 ): InventoryTxn[] {
+  // A shelf can be counted empty, never negative: a below-zero total would
+  // sweep every lot and then post a forced overrun the lot balance cannot
+  // represent. NaN is not a count either.
+  if (!Number.isFinite(newQty) || newQty < 0) {
+    const item = mustItem(db, itemId);
+    throw new MiseError(`Cannot count ${newQty} ${item.stockUom} of "${item.name}" in a stocktake.`);
+  }
   // A stocktake counts what is on the shelf on the day — expired included,
   // but not a multi-day batch whose completion lot is dated later: that
   // food does not exist yet, and an adjustment must neither count it nor

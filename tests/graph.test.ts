@@ -371,6 +371,11 @@ test('order quantities and dates are integrity-checked too', () => {
     id: 'PO-1', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: 'someday' as never, status: 'open',
     lines: [{ itemId: 'flour', packs: 1, unitPrice: 1 }],
   });
+  // An open order with nothing on it can never be received.
+  database.purchaseOrders.push({
+    id: 'PO-3', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
+    lines: [],
+  });
   // Individually valid dates, impossibly ordered: supply before the batch
   // could exist, a delivery before the order was placed.
   database.productionOrders.push({
@@ -387,6 +392,7 @@ test('order quantities and dates are integrity-checked too', () => {
   assert.ok(issues.some((i) => i.includes('invalid expectedOn date "someday"')));
   assert.ok(issues.some((i) => i.includes('starts on 2026-07-05, after it is due')));
   assert.ok(issues.some((i) => i.includes('expected on 2026-07-03, before it was ordered')));
+  assert.ok(issues.some((i) => i.includes('Purchase order "PO-3" has no lines')));
   // And all three orders target purchased flour — unmakeable commitments.
   assert.ok(issues.some((i) => i.includes('only manufactured items are made')));
 });

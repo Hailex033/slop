@@ -335,6 +335,12 @@ export function receivePurchaseOrder(
   if (!order) throw new NotFoundError('purchase order', orderId);
   if (order.status === 'received') throw new MiseError(`Purchase order "${orderId}" is already received.`);
   if (order.status === 'cancelled') throw new MiseError(`Purchase order "${orderId}" was cancelled.`);
+  // An order with no lines books nothing: closing it would retire the
+  // commitment with no lot and no ledger evidence — refuse, like every
+  // other unreceivable line, until the data is repaired.
+  if (order.lines.length === 0) {
+    throw new MiseError(`Order "${order.id}" has no lines — nothing to receive.`);
+  }
 
   const lots: Lot[] = [];
   let cost = 0;

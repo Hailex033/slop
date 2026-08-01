@@ -19,6 +19,21 @@ import {
 import { nextId } from '../src/domain/ids.js';
 import { close, db, phantom, purchased } from './helpers.js';
 
+test('a stocktake cannot count below empty', () => {
+  const database = db([purchased('flour')]);
+  receive(database, 'flour', { qty: 100, on: '2026-07-01' });
+
+  // Below zero would sweep every lot and post a forced overrun the lot
+  // balance cannot represent; NaN is not a count.
+  assert.throws(() => adjust(database, 'flour', -5, '2026-07-02'), MiseError);
+  assert.throws(() => adjust(database, 'flour', Number.NaN, '2026-07-02'), MiseError);
+  assert.ok(close(onHand(database, 'flour'), 100), 'the shelf is untouched');
+
+  // Counted empty is a legal, honest state.
+  adjust(database, 'flour', 0, '2026-07-02');
+  assert.ok(close(onHand(database, 'flour'), 0));
+});
+
 test('a stocktake counts the shelf, not the batch still in the oven', () => {
   const database = db([purchased('flour')]);
   receive(database, 'flour', { qty: 100, on: '2026-07-01' });

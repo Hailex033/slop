@@ -448,6 +448,19 @@ test('production orders exist only for things that can be made', () => {
   assert.equal(database.productionOrders.length, 0);
 });
 
+test('an empty purchase order cannot be received shut', () => {
+  const database = db([purchased('flour')]);
+  database.purchaseOrders.push({
+    id: 'PO-1', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
+    lines: [],
+  });
+
+  // Closing it would retire the commitment with no lot and no ledger
+  // evidence — a malformed order silently becoming history.
+  assert.throws(() => receivePurchaseOrder(database, 'PO-1', '2026-07-02'), /no lines/);
+  assert.equal(database.purchaseOrders[0]!.status, 'open');
+});
+
 test('a zero-quantity order line blocks the receipt instead of vanishing', () => {
   const database = db([purchased('flour')]);
   database.purchaseOrders.push({

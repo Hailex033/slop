@@ -558,6 +558,11 @@ export function validate(db: Database): string[] {
         `Purchase order "${order.id}" is expected on ${order.expectedOn}, before it was ordered (${order.orderedOn}).`,
       );
     }
+    // An open order with nothing on it can never be received: the receipt
+    // refuses to close a commitment with no lot or ledger evidence.
+    if (order.status === 'open' && order.lines.length === 0) {
+      issues.push(`Purchase order "${order.id}" has no lines.`);
+    }
     for (const line of order.lines) {
       if (!findItem(db, line.itemId)) {
         issues.push(`Purchase order "${order.id}" has a line for unknown item "${line.itemId}".`);
