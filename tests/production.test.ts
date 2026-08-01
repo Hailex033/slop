@@ -5,7 +5,7 @@ import { onHand, onOrder, receive } from '../src/engine/inventory.js';
 import { commitProduction, runMrp } from '../src/engine/mrp.js';
 import { bySupplier, packsFor, raisePurchaseOrders, receivePurchaseOrder, shoppingList } from '../src/engine/procurement.js';
 import { cookableNow, executeOrder, feasibility, prepSchedule, produce, serve } from '../src/engine/production.js';
-import { MiseError, ShortageError } from '../src/domain/errors.js';
+import { CycleError, MiseError, ShortageError } from '../src/domain/errors.js';
 import { close, db, made, nestedDb, purchased, recipe } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -414,6 +414,42 @@ test('cooking a recipe with a deleted component is refused, not quietly abridged
   // book a full dish that never contained its cheese.
   assert.throws(() => produce(database, 'dish', 1500, { on: '2026-07-01' }), /unknown item "cheese"/);
   assert.equal(onHand(database, 'butter'), 500, 'the sauce it had already made was rolled back');
+});
+
+test('a recipe cycle fails cleanly when cooking, not with a stack overflow', () => {
+  const database = db(
+    [made('a'), made('b')],
+    [
+      recipe('a', 100, [{ itemId: 'b', qty: 50, uom: 'g' }]),
+      recipe('b', 100, [{ itemId: 'a', qty: 50, uom: 'g' }]),
+    ],
+  );
+  // With nothing in stock the cascade chases the loop; it must be named,
+  // not left to exhaust the call stack.
+  assert.throws(() => produce(database, 'a', 100, { on: '2026-07-01' }), CycleError);
+});
+
+test('a receipt line with no pack terms anywhere is refused, keeping the order open', () => {
+  const database = nestedDb();
+  // A legacy order saved before lines carried their own pack terms…
+  database.purchaseOrders.push({
+    id: 'PO-0001',
+    supplierId: 'shop',
+    orderedOn: '2026-07-01',
+    expectedOn: '2026-07-01',
+    status: 'open',
+    lines: [{ itemId: 'butter', packs: 2, unitPrice: 1 }],
+  });
+  // …whose item has since lost its purchase terms to a hand edit.
+  database.items = database.items.map((item) => {
+    if (item.id !== 'butter') return item;
+    const { purchase: _purchase, ...rest } = item;
+    return rest;
+  });
+
+  assert.throws(() => receivePurchaseOrder(database, 'PO-0001', '2026-07-02'), MiseError);
+  assert.equal(database.purchaseOrders[0]!.status, 'open', 'repairable, not silently emptied');
+  assert.equal(database.lots.length, 0, 'nothing was booked in');
 });
 
 test('feasibility keeps counting past the old search ceiling', () => {

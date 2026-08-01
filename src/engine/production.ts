@@ -11,7 +11,7 @@
 
 import { conversionContext, findItem, isMade, isStocked, mustItem, recipeFor } from '../domain/db.js';
 import { addDays, today, type IsoDate } from '../domain/date.js';
-import { MiseError, NotFoundError } from '../domain/errors.js';
+import { CycleError, MiseError, NotFoundError } from '../domain/errors.js';
 import { convert } from '../domain/units.js';
 import { nextId } from '../domain/ids.js';
 import type { Database, ItemId, ProductionOrder } from '../domain/types.js';
@@ -435,12 +435,19 @@ function produceInner(
   itemId: ItemId,
   qty: number,
   options: ProduceOptions = {},
+  path: readonly ItemId[] = [],
 ): ProductionResult {
   const { cascade = true, allowShortages = false, includeOptional = false } = options;
   const on = options.on ?? today();
   const item = mustItem(db, itemId);
   const recipe = recipeFor(db, itemId);
   const ref = options.ref ?? `make:${itemId}`;
+
+  // The same guard explosion carries: a hand-edited database can contain a
+  // recipe loop, and with nothing in stock the cascade would chase it until
+  // the call stack ran out. Name the loop instead.
+  if (path.includes(itemId)) throw new CycleError([...path, itemId]);
+  const nextPath = [...path, itemId];
 
   if (!recipe) {
     throw new MiseError(`"${item.name}" has no recipe; it can only be bought.`);
@@ -478,12 +485,13 @@ function produceInner(
     // Phantom: nothing to take off a shelf, so make it inline and charge its
     // components to this order.
     if (!isStocked(child)) {
-      const inner = produceInner(db, child.id, need, {
-        ...options,
-        on,
-        ref,
-        consumeImmediately: true,
-      });
+      const inner = produceInner(
+        db,
+        child.id,
+        need,
+        { ...options, on, ref, consumeImmediately: true },
+        nextPath,
+      );
       cost += inner.cost;
       cascadedMinutes += inner.minutes;
       shortages.push(...inner.shortages);
@@ -503,7 +511,7 @@ function produceInner(
     const available = availableOn(db, child.id, on);
     if (available + 1e-9 < need && isMade(child) && cascade) {
       const gap = need - available;
-      const inner = produceInner(db, child.id, gap, { ...options, on, ref });
+      const inner = produceInner(db, child.id, gap, { ...options, on, ref }, nextPath);
       cascadedMinutes += inner.minutes;
       shortages.push(...inner.shortages);
       madeToOrder = true;

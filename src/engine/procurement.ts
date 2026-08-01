@@ -306,7 +306,16 @@ export function receivePurchaseOrder(
       // lines carried their own terms.
       const packQty = line.packQty ?? item.purchase?.packQty;
       const packUom = line.packUom ?? item.purchase?.packUom;
-      if (packQty === undefined || packUom === undefined) continue;
+      if (packQty === undefined || packUom === undefined) {
+        // No snapshot and no live terms either: there is no defensible
+        // quantity to book. Skipping the line and marking the order received
+        // would erase its inbound supply without a lot or an error — throw
+        // instead, so the order stays open until the data is repaired.
+        throw new MiseError(
+          `Order "${order.id}" line for "${item.name}" has no pack size on the line or the item — ` +
+            `cannot receive it until one is restored.`,
+        );
+      }
       const qty = convert(line.packs * packQty, packUom, item.stockUom, conversionContext(item));
       if (qty <= 0) continue;
 
