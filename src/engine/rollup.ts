@@ -564,29 +564,69 @@ export interface TimeRollup {
   readonly criticalPath: readonly ItemId[];
 }
 
-export function rollupTime(db: Database, itemId: ItemId): TimeRollup {
+/**
+ * Time for a required quantity of an item, over its whole recipe tree.
+ *
+ * The batch policy is `runMinutes`': hands-on time scales with the batch
+ * count — twenty batches of mince are browned twenty times — while unattended
+ * time does not, because batches prove and simmer alongside one another.
+ * Omitting `qty` reads the tree at one batch of the root, with sub-recipes
+ * scaled to what that one batch actually calls for.
+ */
+export function rollupTime(
+  db: Database,
+  itemId: ItemId,
+  qty?: number,
+  uom?: UomCode,
+  options: RollupOptions = {},
+): TimeRollup {
+  const { includeOptional = false } = options;
+  const root = mustItem(db, itemId);
+  if (qty !== undefined && qty < 0) {
+    throw new MiseError(`Cannot time a negative quantity (${qty}) of "${root.name}".`);
+  }
+  const rootQty =
+    qty === undefined ? undefined : convert(qty, uom ?? root.stockUom, root.stockUom, conversionContext(root));
+
   let activeMin = 0;
   let passiveMin = 0;
 
-  const longest = (id: ItemId, seen: ReadonlySet<ItemId>): { minutes: number; path: ItemId[] } => {
+  // `required` is in the item's stock unit; undefined means "one batch of
+  // whatever this recipe makes" — the reading a bare recipe card gives.
+  const longest = (
+    id: ItemId,
+    required: number | undefined,
+    seen: ReadonlySet<ItemId>,
+  ): { minutes: number; path: ItemId[] } => {
     const item = findItem(db, id);
-    const recipe = item && isMade(item) && !seen.has(id) ? recipeFor(db, id) : undefined;
-    if (!recipe) return { minutes: 0, path: [id] };
+    if (!item) return { minutes: 0, path: [id] };
+    const recipe = isMade(item) && !seen.has(id) ? recipeFor(db, id) : undefined;
+    // No food, no work: a zero requirement takes zero minutes.
+    if (!recipe || (required !== undefined && required <= 1e-9)) return { minutes: 0, path: [id] };
+
+    const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
+    const batches = required === undefined ? 1 : batchQty === 0 ? 0 : required / batchQty;
 
     const nextSeen = new Set(seen).add(id);
     const own = recipeMinutes(recipe);
-    activeMin += own.active;
+    activeMin += own.active * batches;
     passiveMin += own.passive;
 
     let best = { minutes: 0, path: [] as ItemId[] };
     for (const component of recipe.components) {
-      const child = longest(component.itemId, nextSeen);
-      if (child.minutes > best.minutes) best = child;
+      if (component.optional && !includeOptional) continue;
+      const child = findItem(db, component.itemId);
+      if (!child) continue;
+      const scaled = component.scalable === false ? component.qty : component.qty * batches;
+      const inChildUnits = convert(scaled, component.uom, child.stockUom, conversionContext(child));
+      const grossed = component.lossPct ? inChildUnits / (1 - component.lossPct) : inChildUnits;
+      const result = longest(component.itemId, grossed, nextSeen);
+      if (result.minutes > best.minutes) best = result;
     }
-    return { minutes: own.active + own.passive + best.minutes, path: [id, ...best.path] };
+    return { minutes: own.active * batches + own.passive + best.minutes, path: [id, ...best.path] };
   };
 
-  const critical = longest(itemId, new Set());
+  const critical = longest(itemId, rootQty, new Set());
   return {
     activeMin,
     passiveMin,

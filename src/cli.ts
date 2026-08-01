@@ -265,7 +265,7 @@ const commands: Record<string, Command> = {
       );
 
       const leaves = aggregate(tree, { level: 'leaves' });
-      const time = rollupTime(ctx.db, target.itemId);
+      const time = rollupTime(ctx.db, target.itemId, target.qty, target.uom);
       out();
       out(
         f.style(
@@ -751,7 +751,10 @@ const commands: Record<string, Command> = {
       out(f.heading(`Shopping list — ${formatDate(list.asOf)}`));
       for (const group of bySupplier(list)) {
         out();
-        out(`  ${f.style(group.supplier, 'bold')} ${f.style(`— ${f.money(group.total, currency)}`, 'grey')}`);
+        out(
+          `  ${f.style(group.supplier, 'bold')} ` +
+            f.style(`— ${formatDate(group.orderBy)} — ${f.money(group.total, currency)}`, 'grey'),
+        );
         out(
           f.table(group.lines, [
             { header: 'Item', get: (l) => l.name },

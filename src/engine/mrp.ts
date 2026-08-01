@@ -42,8 +42,13 @@ export interface Demand {
   readonly qty: number;
   /** The date the quantity is needed *by*. */
   readonly dueOn: IsoDate;
-  /** Where the demand came from: a meal plan entry id, or a parent order id. */
-  readonly source: string;
+  /**
+   * Where the demand came from: meal plan entry ids, or parent order ids.
+   * A production run that serves several meals passes *all* of them down to
+   * its components, so the shopping list can answer "what is this for?"
+   * completely rather than naming whichever meal happened to be first.
+   */
+  readonly sources: readonly string[];
   readonly level: number;
 }
 
@@ -137,7 +142,7 @@ export function demandFromPlan(
       itemId: entry.itemId,
       qty: quantityForServings(db, entry.itemId, entry.servings).qty,
       dueOn: entry.date,
-      source: entry.id,
+      sources: [entry.id],
       level: 0,
     }));
 }
@@ -222,7 +227,7 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       const passes = batchShortfalls(
         [...demands]
           .sort((a, b) => a.dueOn.localeCompare(b.dueOn))
-          .map((demand) => ({ qty: demand.qty, dueOn: demand.dueOn, source: demand.source })),
+          .map((demand) => ({ qty: demand.qty, dueOn: demand.dueOn, sources: demand.sources })),
         0,
       );
       for (const pass of passes) {
@@ -245,7 +250,7 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
         itemId,
         qty: safety,
         dueOn: shortNow ? asOf : horizonEnd,
-        source: SAFETY_STOCK,
+        sources: [SAFETY_STOCK],
         level,
       });
     }
@@ -405,9 +410,11 @@ function batchShortfalls(
 
     if (current && stillGood) {
       current.qty += short.qty;
-      if (!current.sources.includes(short.source)) current.sources.push(short.source);
+      for (const source of short.sources) {
+        if (!current.sources.includes(source)) current.sources.push(source);
+      }
     } else {
-      runs.push({ qty: short.qty, dueOn: short.dueOn, sources: [short.source] });
+      runs.push({ qty: short.qty, dueOn: short.dueOn, sources: [...short.sources] });
     }
   }
   return runs;
@@ -496,7 +503,7 @@ function supplyFor(
 interface Shortfall {
   readonly qty: number;
   readonly dueOn: IsoDate;
-  readonly source: string;
+  readonly sources: readonly string[];
 }
 
 interface Allocation {
@@ -533,7 +540,7 @@ function allocate(buckets: SupplyBucket[], requirements: readonly Demand[]): All
       else fromOrders += take;
     }
     if (remaining > 1e-9) {
-      shortfalls.push({ qty: remaining, dueOn: requirement.dueOn, source: requirement.source });
+      shortfalls.push({ qty: remaining, dueOn: requirement.dueOn, sources: requirement.sources });
     }
   }
 
@@ -636,11 +643,14 @@ function explodeOneLevel(
     const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));
     const gross = component.lossPct ? net / (1 - component.lossPct) : net;
 
+    // Every source, not just the first: a run that serves Tuesday's lasagne
+    // and Thursday's leftovers must peg its mince to both, or the shopping
+    // list's "what is this for?" answer silently loses meals.
     addDemand({
       itemId: child.id,
       qty: gross,
       dueOn,
-      source: pegging[0] ?? itemId,
+      sources: pegging.length > 0 ? pegging : [itemId],
       level: level + 1,
     });
   }

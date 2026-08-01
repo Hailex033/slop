@@ -157,22 +157,36 @@ function toShoppingLine(
   };
 }
 
-/** Group a shopping list the way you actually shop: one trip per supplier. */
-export function bySupplier(list: ShoppingList): { supplier: string; lines: ShoppingLine[]; total: number }[] {
-  const groups = new Map<string, ShoppingLine[]>();
+export interface ShoppingTrip {
+  readonly supplier: string;
+  /** The day this visit happens. Two Saturdays at the market are two trips. */
+  readonly orderBy: IsoDate;
+  readonly lines: ShoppingLine[];
+  readonly total: number;
+}
+
+/**
+ * Group a shopping list the way you actually shop: one group per *trip* — a
+ * supplier on a date — not one per supplier. A perishable wanted twice in the
+ * week means two visits to the same shop, and merging them into one undated
+ * group would hide the second visit that `raisePurchaseOrders` goes on to
+ * create an order for.
+ */
+export function bySupplier(list: ShoppingList): ShoppingTrip[] {
+  const groups = new Map<string, { supplier: string; orderBy: IsoDate; lines: ShoppingLine[] }>();
   for (const line of list.lines) {
-    const key = line.supplierName ?? 'Unsourced';
+    const supplier = line.supplierName ?? 'Unsourced';
+    const key = `${supplier}@${line.orderBy}`;
     const group = groups.get(key);
-    if (group) group.push(line);
-    else groups.set(key, [line]);
+    if (group) group.lines.push(line);
+    else groups.set(key, { supplier, orderBy: line.orderBy, lines: [line] });
   }
-  return [...groups.entries()]
-    .map(([supplier, lines]) => ({
-      supplier,
-      lines,
-      total: lines.reduce((sum, line) => sum + line.lineCost, 0),
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      total: group.lines.reduce((sum, line) => sum + line.lineCost, 0),
     }))
-    .sort((a, b) => a.supplier.localeCompare(b.supplier));
+    .sort((a, b) => a.orderBy.localeCompare(b.orderBy) || a.supplier.localeCompare(b.supplier));
 }
 
 /**

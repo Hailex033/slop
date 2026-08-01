@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
 import { onHand, onOrder, receive } from '../src/engine/inventory.js';
 import { runMrp } from '../src/engine/mrp.js';
-import { packsFor, raisePurchaseOrders, receivePurchaseOrder, shoppingList } from '../src/engine/procurement.js';
+import { bySupplier, packsFor, raisePurchaseOrders, receivePurchaseOrder, shoppingList } from '../src/engine/procurement.js';
 import { cookableNow, feasibility, prepSchedule, produce, serve } from '../src/engine/production.js';
 import { MiseError, ShortageError } from '../src/domain/errors.js';
 import { close, db, made, nestedDb, purchased, recipe } from './helpers.js';
@@ -108,6 +108,23 @@ test('a pack-size edit after ordering does not change what was ordered', () => {
   const receipt = receivePurchaseOrder(database, order.id, '2026-07-02');
   assert.equal(receipt.lots.length, 1);
   assert.ok(close(receipt.lots[0]!.qty, 200), `got ${receipt.lots[0]!.qty}`);
+});
+
+test('two visits to the same supplier are two trips on the shopping list', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, shelfLifeDays: 2 } : item,
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'cheese', servings: 200 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-08', slot: 'dinner', itemId: 'cheese', servings: 200 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 10 }));
+  const groups = bySupplier(list);
+
+  // Six days apart on a two-day shelf life cannot be one undated visit.
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups.map((g) => g.orderBy), ['2026-07-02', '2026-07-08']);
+  assert.ok(groups.every((g) => g.supplier === 'Shop'));
 });
 
 test('one purchase order per trip, not per supplier', () => {

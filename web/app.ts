@@ -219,7 +219,9 @@ function viewRecipes(): HTMLElement[] {
   const rollupOptions = { includeOptional: state.includeOptional };
   const cost = costOf(db, state.itemId, target.qty, target.uom, rollupOptions);
   const facts = nutritionOf(db, state.itemId, target.qty, target.uom, rollupOptions);
-  const time = rollupTime(db, state.itemId);
+  // Same quantity, same options as the cost and the tree — the time shown
+  // must describe the batch on screen, not one unscaled recipe card.
+  const time = rollupTime(db, state.itemId, target.qty, target.uom, rollupOptions);
   const leaves = aggregate(tree, { level: 'leaves', includeOptional: state.includeOptional });
   const allergens = rollupAllergens(db, state.itemId);
   const depth = recipeDepth(db, state.itemId);
@@ -494,10 +496,11 @@ function viewShop(): HTMLElement[] {
     el('div', { class: 'stats' },
       stat('Total', cash(list.total)),
       stat('Lines', String(list.lines.length)),
-      stat('Trips', String(groups.length), groups.map((g) => g.supplier).join(', ')),
+      stat('Trips', String(groups.length),
+        groups.map((g) => `${g.supplier} ${formatDate(g.orderBy)}`).join(', ')),
     ),
     ...groups.flatMap((group) => [
-      el('h2', {}, `${group.supplier} — ${cash(group.total)}`),
+      el('h2', {}, `${group.supplier} — ${formatDate(group.orderBy)} — ${cash(group.total)}`),
       el('div', { class: 'panel' },
         tableOf(group.lines, [
           { head: 'Item', cell: (l) => l.name },

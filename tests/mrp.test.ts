@@ -563,6 +563,23 @@ test('a fixed component under a phantom is counted once per making', () => {
   assert.ok(close(salt.gross, 10), `got ${salt.gross}`);
 });
 
+test('a run that serves two meals pegs both, all the way to the shopping list', () => {
+  const database = nestedDb();
+  planned(database, 'sauce', 1000, '2026-07-02');
+  planned(database, 'sauce', 1000, '2026-07-04');
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+
+  // Sauce keeps, so one production run covers both meals…
+  const runs = result.production.filter((order) => order.itemId === 'sauce');
+  assert.equal(runs.length, 1);
+  assert.deepEqual([...runs[0]!.pegging].sort(), ['MP-1', 'MP-2']);
+
+  // …and the butter that run needs answers to both meals, not just the first.
+  const butter = result.purchases.find((line) => line.itemId === 'butter')!;
+  assert.deepEqual([...butter.pegging].sort(), ['MP-1', 'MP-2']);
+});
+
 test('a phantom needed once is still exploded once', () => {
   const database = nestedDb();
   planned(database, 'sauce', 1000, '2026-07-02');

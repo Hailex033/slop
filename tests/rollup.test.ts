@@ -256,6 +256,35 @@ test('allergens union across the whole tree, flagging optional-only paths', () =
   assert.equal(byName.get('nuts')!.onlyOptional, true);
 });
 
+test('hands-on time scales with the quantity; unattended time does not', () => {
+  const database = db(
+    [purchased('mince'), made('ragu')],
+    [
+      recipe('ragu', 1000, [{ itemId: 'mince', qty: 500, uom: 'g' }], {
+        steps: [
+          { text: 'brown', activeMin: 60 },
+          { text: 'simmer', passiveMin: 120 },
+        ],
+      }),
+    ],
+  );
+
+  const one = rollupTime(database, 'ragu', 1000, 'g');
+  assert.equal(one.activeMin, 60);
+  assert.equal(one.criticalPathMin, 180);
+
+  // Twenty batches: twenty rounds of browning, one shared simmer alongside.
+  const twenty = rollupTime(database, 'ragu', 20_000, 'g');
+  assert.equal(twenty.activeMin, 1200, 'the mince still has to be browned twenty times');
+  assert.equal(twenty.passiveMin, 120, 'the pots all simmer at once');
+  assert.equal(twenty.criticalPathMin, 1320);
+
+  // Unscaled keeps the recipe-card reading; nothing takes negative time.
+  assert.equal(rollupTime(database, 'ragu').activeMin, 60);
+  assert.equal(rollupTime(database, 'ragu', 0, 'g').criticalPathMin, 0);
+  assert.throws(() => rollupTime(database, 'ragu', -1, 'g'), MiseError);
+});
+
 test('critical path is the longest chain, not the sum', () => {
   const database = db(
     [purchased('x'), made('slow-child'), made('fast-child'), made('parent')],
