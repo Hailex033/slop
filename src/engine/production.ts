@@ -464,6 +464,14 @@ export interface ProduceOptions {
    * is matched automatically; pass an id to be explicit.
    */
   readonly planEntryId?: string;
+  /**
+   * Settle open production orders for sub-recipes the cascade cooks inline.
+   * Only order execution sets this: the child orders were committed alongside
+   * the parent, so the inline make is that commitment being met. An ad-hoc
+   * cook leaves the order book alone — its output goes into today's dish,
+   * not into the future the standing orders were raised for.
+   */
+  readonly settleOrders?: boolean;
 }
 
 /**
@@ -577,11 +585,13 @@ function produceInner(
       cascadedMinutes += inner.minutes;
       shortages.push(...inner.shortages);
       madeToOrder = true;
-      // Cooking the gap inline has, in fact, executed the committed order
-      // that stood for it. Left open, that order would be cooked again —
-      // duplicate stock — while MRP and prep kept counting a commitment
-      // that has already been met.
-      settleCommittedOrders(db, child.id, gap);
+      // While a committed parent is being executed, cooking the gap inline
+      // has, in fact, executed the committed child order that stood for it.
+      // Left open, that order would be cooked again — duplicate stock —
+      // while MRP and prep kept counting a commitment already met. An ad-hoc
+      // cook is different: its sauce went into *this* dish, not into the
+      // future meal the order book is holding, so it settles nothing.
+      if (options.settleOrders === true) settleCommittedOrders(db, child.id, gap);
     }
 
     // `consumeImmediately` decides whether the *output* gets booked into stock.
@@ -752,7 +762,9 @@ function serveInner(
 }
 
 /**
- * Apply quantity cooked by a cascade against the open orders it fulfilled.
+ * Apply quantity cooked by an order execution's cascade against the open
+ * orders it fulfilled. Only `executeOrder` reaches here — the cascade of an
+ * ad-hoc cook fulfils nothing on the order book.
  *
  * Orders are settled earliest-due-first, whatever their scheduled start: a
  * parent executed ahead of plan cooks its child ahead of plan too, and the
@@ -795,6 +807,7 @@ export function executeOrder(db: Database, orderId: string, options: ProduceOpti
     includeOptional: order.includeOptional === true,
     ...options,
     ref: orderId,
+    settleOrders: true,
   });
   order.status = 'received';
   return result;

@@ -142,7 +142,8 @@ export function numberFlag(args: Args, name: string, fallback: number): number {
   if (raw === undefined) return fallback;
   // Supplied is supplied: a bare `--horizon` or `--horizon nope` must not
   // quietly plan — and commit — a different horizon than the one asked for.
-  if (raw === true) throw new MiseError(`--${name} needs a number.`);
+  // The empty string would sail through as Number('') === 0.
+  if (raw === true || raw === '') throw new MiseError(`--${name} needs a number.`);
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) {
     throw new MiseError(`--${name} must be a number, not "${raw}".`);
@@ -150,9 +151,14 @@ export function numberFlag(args: Args, name: string, fallback: number): number {
   return parsed;
 }
 
-function stringFlag(args: Args, name: string): string | undefined {
+export function stringFlag(args: Args, name: string): string | undefined {
   const raw = args.flags[name];
-  return typeof raw === 'string' ? raw : undefined;
+  if (raw === undefined) return undefined;
+  // The same rule for words: a bare `--db` parses as boolean true, and
+  // falling back to the default path would mutate the very database the
+  // flag was there to steer away from.
+  if (typeof raw !== 'string' || raw === '') throw new MiseError(`--${name} needs a value.`);
+  return raw;
 }
 
 function boolFlag(args: Args, name: string): boolean {
@@ -185,10 +191,10 @@ interface Ctx {
 /** Resolve the item argument and the amount wanted, in one place. */
 function targetOf(ctx: Ctx, ref: string): { itemId: ItemId; qty: number; uom: UomCode; servings: number } {
   const item = resolveItem(ctx.db, ref);
-  const servingsFlag = ctx.args.flags['servings'];
-  const qtyFlag = ctx.args.flags['qty'];
+  const servingsFlag = stringFlag(ctx.args, 'servings');
+  const qtyFlag = stringFlag(ctx.args, 'qty');
 
-  if (typeof qtyFlag === 'string') {
+  if (qtyFlag !== undefined) {
     const uom = (stringFlag(ctx.args, 'uom') ? parseUom(stringFlag(ctx.args, 'uom')!) : item.stockUom) as UomCode;
     const amount = parseQuantity(qtyFlag);
     return {
@@ -201,7 +207,7 @@ function targetOf(ctx: Ctx, ref: string): { itemId: ItemId; qty: number; uom: Uo
 
   const recipe = recipeFor(ctx.db, item.id);
   const servings =
-    typeof servingsFlag === 'string' ? parseQuantity(servingsFlag) : (recipe?.servings ?? 1);
+    servingsFlag !== undefined ? parseQuantity(servingsFlag) : (recipe?.servings ?? 1);
   const resolved = quantityForServings(ctx.db, item.id, servings);
   return { itemId: item.id, qty: resolved.qty, uom: resolved.uom, servings };
 }
@@ -508,7 +514,7 @@ const commands: Record<string, Command> = {
         const item = resolveItem(ctx.db, ref);
         const uom = rawUom ? parseUom(rawUom) : item.stockUom;
         const expires = stringFlag(ctx.args, 'expires');
-        const cost = ctx.args.flags['cost'];
+        const cost = stringFlag(ctx.args, 'cost');
         const amount = parseQuantity(rawQty);
         // `--cost` is what the whole lot cost. Lots store cost per *stock*
         // unit, so divide by the converted quantity, not the entered one:

@@ -637,6 +637,28 @@ test('a cascade covering part of a child order reduces it; the rest settles late
   assert.equal(sauceOrder.status, 'received');
 });
 
+test('an ad-hoc cook leaves committed orders for other meals standing', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const sauceOrder = database.productionOrders.find((o) => o.itemId === 'sauce')!;
+  const committedQty = sauceOrder.qty;
+
+  // Guests tonight: an extra dish with nothing to do with Friday's plan. The
+  // cascade cooks sauce for *this* dish and issues it straight into it —
+  // Friday's committed sauce has still not been made, so its order must
+  // survive at full strength or MRP and prep will quietly drop a batch that
+  // is still owed.
+  produce(database, 'dish', 1000, { on: '2026-07-01' });
+
+  assert.equal(sauceOrder.status, 'open', 'the commitment still stands');
+  assert.equal(sauceOrder.qty, committedQty, 'at its full quantity');
+});
+
 test('cooking a recipe with a deleted component is refused, not quietly abridged', () => {
   const database = nestedDb();
   database.items = database.items.filter((item) => item.id !== 'cheese');

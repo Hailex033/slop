@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { numberFlag, parseArgs } from '../src/cli.js';
+import { numberFlag, parseArgs, stringFlag } from '../src/cli.js';
 import { MiseError } from '../src/domain/errors.js';
 
 test('a boolean flag before a positional does not eat it', () => {
@@ -53,4 +53,20 @@ test('a supplied numeric flag must actually be a number', () => {
   assert.equal(numberFlag({ positionals: [], flags: { horizon: '14' } }, 'horizon', 7), 14);
   assert.throws(() => numberFlag({ positionals: [], flags: { horizon: 'nope' } }, 'horizon', 7), MiseError);
   assert.throws(() => numberFlag({ positionals: [], flags: { horizon: true } }, 'horizon', 7), MiseError);
+});
+
+test('an empty numeric value is rejected, not read as zero', () => {
+  // `--horizon=` would otherwise slip through as Number('') === 0 and plan
+  // an empty horizon nobody asked for.
+  assert.throws(() => numberFlag({ positionals: [], flags: { horizon: '' } }, 'horizon', 7), MiseError);
+});
+
+test('a supplied string flag must actually have a value', () => {
+  // `mise init --db --force`: bare `--db` parses as boolean true, and a
+  // silent fall-back to the default path would overwrite the very database
+  // the flag was trying to steer away from. Refuse before anything moves.
+  assert.equal(stringFlag({ positionals: [], flags: {} }, 'db'), undefined);
+  assert.equal(stringFlag({ positionals: [], flags: { db: 'other.json' } }, 'db'), 'other.json');
+  assert.throws(() => stringFlag({ positionals: [], flags: { db: true } }, 'db'), MiseError);
+  assert.throws(() => stringFlag({ positionals: [], flags: { db: '' } }, 'db'), MiseError);
 });
