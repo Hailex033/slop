@@ -882,6 +882,36 @@ test('serving planned meals one by one still cooks the committed batch once', ()
   assert.ok(close(onHand(database, 'sachet2'), 0), 'one making, one sachet');
 });
 
+test('a parent waits for its cascaded multi-day child to finish', () => {
+  const database = db(
+    [purchased('flour'), made('starterloaf'), made('feast')],
+    [
+      recipe('starterloaf', 1000, [{ itemId: 'flour', qty: 600, uom: 'g' }], {
+        servings: 2,
+        steps: [{ text: 'long prove', activeMin: 30, passiveMin: 960 }],
+      }),
+      recipe('feast', 1000, [{ itemId: 'starterloaf', qty: 1000, uom: 'g' }], { servings: 2 }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-06', slot: 'dinner', itemId: 'feast', servings: 2 });
+  receive(database, 'flour', { qty: 5000, on: '2026-07-01' });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 10 }));
+
+  const feastOrder = database.productionOrders.find((o) => o.itemId === 'feast')!;
+  const childOrder = database.productionOrders.find((o) => o.itemId === 'starterloaf')!;
+  assert.equal(childOrder.startOn, '2026-07-04', 'the prove spans days');
+  assert.equal(childOrder.dueOn, '2026-07-06');
+
+  // The child was never made; executing the parent on its own start date
+  // makes it inline — and the feast cannot come out of the oven before the
+  // prove its cascade still owed has happened.
+  const result = executeOrder(database, feastOrder.id, { on: feastOrder.startOn });
+  assert.equal(result.lagDays, 2, `got ${result.lagDays}`);
+  assert.equal(childOrder.status, 'received');
+  const feastLot = database.lots.find((l) => l.itemId === 'feast')!;
+  assert.equal(feastLot.receivedOn, '2026-07-08', 'start plus the prove still owed');
+});
+
 test('a multi-day batch ages from its completion, not its start', () => {
   const database = db(
     [purchased('flour'), made('loaf2', { shelfLifeDays: 1 })],

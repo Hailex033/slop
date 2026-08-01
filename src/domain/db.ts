@@ -436,6 +436,11 @@ export function validate(db: Database): string[] {
     if (!Number.isFinite(lot.qty) || lot.qty < 0) {
       issues.push(`Lot "${lot.id}" has an invalid quantity (${lot.qty}).`);
     }
+    // The same rule receive enforces: a negative or non-finite cost turns
+    // the pantry valuation, and every meal drawing on the lot, into nonsense.
+    if (lot.unitCost !== undefined && (!Number.isFinite(lot.unitCost) || lot.unitCost < 0)) {
+      issues.push(`Lot "${lot.id}" has an invalid unitCost of ${lot.unitCost}.`);
+    }
     if (!isIsoDate(lot.receivedOn)) {
       issues.push(`Lot "${lot.id}" has an invalid receivedOn date "${lot.receivedOn}".`);
     }

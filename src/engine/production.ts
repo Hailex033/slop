@@ -462,6 +462,11 @@ export interface ProductionResult {
   readonly shortages: readonly Shortage[];
   readonly minutes: number;
   /**
+   * Days after the cook date before this making's output physically exists:
+   * the planned spans of committed child orders its cascade made first.
+   */
+  readonly lagDays?: number;
+  /**
    * The earliest meal plan entry this serving fulfilled, when any matched.
    * A serving bigger than one entry retires the following due entries too.
    */
@@ -571,6 +576,10 @@ function produceInner(
   // Anything cooked on the spot to satisfy this order was still cooked by this
   // order, so its time belongs in the total.
   let cascadedMinutes = 0;
+  // Days this making's output lands after its cook date: the planned spans
+  // of committed child orders the cascade had to make first. Siblings wait
+  // side by side, so they combine as the longest, not the sum.
+  let lagDays = 0;
 
   for (const component of recipe.components) {
     if (component.optional && !includeOptional) continue;
@@ -604,6 +613,7 @@ function produceInner(
       cost += inner.cost;
       cascadedMinutes += inner.minutes;
       shortages.push(...inner.shortages);
+      lagDays = Math.max(lagDays, inner.lagDays ?? 0);
       consumed.push({
         itemId: child.id,
         name: child.name,
@@ -620,6 +630,7 @@ function produceInner(
     const available = availableOn(db, child.id, on);
     if (available + 1e-9 < need && isMade(child) && cascade) {
       let gap = need - available;
+      let sweptSpanDays = 0;
       if (options.settleOrders === true) {
         // A committed order is the making MRP planned: one run, one dose of
         // every `scalable: false` input, however many meals share it.
@@ -628,7 +639,9 @@ function produceInner(
         // inputs that were planned, and bought, once. Round the cascade up
         // to the boundary of the last order it touches; the surplus is
         // banked for the siblings the merged run was planned to feed.
-        gap = committedMakeQty(db, child, gap, on, options.settlePegs);
+        const committed = committedMakeQty(db, child, gap, on, options.settlePegs);
+        gap = committed.qty;
+        sweptSpanDays = committed.spanDays;
       }
       // The child books its own tub whatever frame asked for it: a phantom
       // parent consumes *its* output immediately, but a stocked child under
@@ -638,6 +651,10 @@ function produceInner(
       const inner = produceInner(db, child.id, gap, { ...inherited, on, ref, consumeImmediately: false }, nextPath);
       cascadedMinutes += inner.minutes;
       shortages.push(...inner.shortages);
+      // A multi-day child made inline finishes days after this cook began,
+      // and everything above it waits: the dish cannot come out of the
+      // oven before the prove its cascade still owed has happened.
+      lagDays = Math.max(lagDays, sweptSpanDays + (inner.lagDays ?? 0));
       madeToOrder = true;
       // While a committed parent is being executed, cooking the gap inline
       // has, in fact, executed the committed child order that stood for it.
@@ -677,7 +694,10 @@ function produceInner(
   if (!options.consumeImmediately) {
     const lot = receive(db, itemId, {
       qty,
-      on: outputOn ?? on,
+      // A scheduled completion shifts by whatever the cascade still owed;
+      // output eaten on the spot (no outputOn) books at the cook date so
+      // the issue that follows can reach it.
+      on: outputOn !== undefined ? addDays(outputOn, lagDays) : on,
       unitCost,
       type: 'produce',
       origin: ref,
@@ -697,6 +717,7 @@ function produceInner(
     ...(lotId ? { lotId } : {}),
     shortages,
     minutes: minutes.total + cascadedMinutes,
+    ...(lagDays > 0 ? { lagDays } : {}),
   };
 }
 
@@ -942,14 +963,19 @@ function committedMakeQty(
   gap: number,
   on: IsoDate,
   pegs?: readonly string[],
-): number {
+): { qty: number; spanDays: number } {
   let boundary = 0;
+  let spanDays = 0;
   for (const order of settleableOrders(db, item.id, pegs)) {
     if (boundary + 1e-9 >= gap) break;
     if (item.shelfLifeDays !== undefined && on < order.startOn) break;
     boundary += order.qty;
+    // The longest planned making among the swept orders: a multi-day child
+    // cooked inline finishes that many days after it starts, and whatever
+    // consumes it must wait.
+    spanDays = Math.max(spanDays, Math.max(0, daysBetween(order.startOn, order.dueOn)));
   }
-  return boundary > gap ? boundary : gap;
+  return { qty: boundary > gap ? boundary : gap, spanDays };
 }
 
 /**

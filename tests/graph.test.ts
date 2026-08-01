@@ -291,6 +291,7 @@ test('quantities that are not numbers are integrity problems', () => {
     ],
   );
   database.lots.push({ id: 'LOT-1', itemId: 'flour', qty: 'oops' as never, receivedOn: '2026-07-01' });
+  database.lots.push({ id: 'LOT-2', itemId: 'flour', qty: 10, receivedOn: '2026-07-01', unitCost: -1 });
   database.mealPlan.push({
     id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'bread2', servings: 'oops' as never,
   });
@@ -308,6 +309,7 @@ test('quantities that are not numbers are integrity problems', () => {
   assert.ok(issues.some((i) => i.includes('out-of-range lossPct')));
   assert.ok(issues.some((i) => i.includes('invalid yield of NaN')));
   assert.ok(issues.some((i) => i.includes('Lot "LOT-1" has an invalid quantity (oops)')));
+  assert.ok(issues.some((i) => i.includes('Lot "LOT-2" has an invalid unitCost of -1')));
   assert.ok(issues.some((i) => i.includes('invalid servings of oops')));
   assert.ok(issues.some((i) => i.includes('invalid activeMin of NaN')));
   assert.ok(issues.some((i) => i.includes('invalid passiveMin of -30')));
