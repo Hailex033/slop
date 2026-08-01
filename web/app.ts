@@ -150,7 +150,7 @@ function sourcingBadge(item: Item): HTMLElement {
 }
 
 /** The recursion tree, collapsible, with the aligned quantity column. */
-function renderTree(root: BomNode, costs: Map<ItemId, number>): HTMLElement {
+function renderTree(root: BomNode, costOfNode: (node: BomNode) => number | undefined): HTMLElement {
   const build = (node: BomNode, isRoot: boolean): HTMLElement => {
     const hasChildren = node.children.length > 0;
     const tags: HTMLElement[] = [];
@@ -185,7 +185,7 @@ function renderTree(root: BomNode, costs: Map<ItemId, number>): HTMLElement {
         el('span', { class: 'tags' }, ...tags),
         el('span', { class: 'qty' }, qty(node.grossQty, node.uom)),
         state.showCosts
-          ? el('span', { class: 'cost' }, cash((costs.get(node.itemId) ?? 0) * node.grossQty))
+          ? el('span', { class: 'cost' }, cash(costOfNode(node) ?? 0))
           : null,
       ),
       hasChildren ? el('ul', {}, ...node.children.map((child) => build(child, false))) : null,
@@ -220,6 +220,16 @@ function viewRecipes(): HTMLElement[] {
   // The same toggle that filters the tree filters the numbers above it, so the
   // headline cost and calories always describe the recipe being displayed.
   const rollupOptions = { includeOptional: state.includeOptional };
+  // Tree nodes are priced at their own quantity: a fixed component does not
+  // repeat per batch, so a per-unit rate times the quantity would overstate
+  // any node with a bay leaf somewhere beneath it.
+  const costNode = (node: BomNode): number | undefined => {
+    try {
+      return costOf(db, node.itemId, node.grossQty, node.uom, rollupOptions).total;
+    } catch {
+      return undefined;
+    }
+  };
   const cost = costOf(db, state.itemId, target.qty, target.uom, rollupOptions);
   const facts = nutritionOf(db, state.itemId, target.qty, target.uom, rollupOptions);
   // Same quantity, same options as the cost and the tree — the time shown
@@ -327,7 +337,7 @@ function viewRecipes(): HTMLElement[] {
         'so the engine expands them — and expands whatever those contain, without any idea how deep it will go.'),
     controls,
     stats,
-    el('div', { class: 'panel' }, renderTree(tree, costs)),
+    el('div', { class: 'panel' }, renderTree(tree, costNode)),
 
     el('h2', {}, 'Rolled up to what you actually buy'),
     el('div', { class: 'panel' },

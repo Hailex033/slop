@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
-import { receive } from '../src/engine/inventory.js';
+import { issue, receive } from '../src/engine/inventory.js';
 import { commitProduction, runMrp } from '../src/engine/mrp.js';
 import { close, db, made, nestedDb, phantom, purchased, recipe } from './helpers.js';
 
@@ -105,6 +105,40 @@ test('a committed optional policy survives beneath a phantom', () => {
   const truffle = rerun.lines.find((line) => line.itemId === 'truffle');
   assert.ok(truffle, 'the garnish is still in the plan');
   assert.ok(close(truffle!.gross, 5), `got ${truffle!.gross}`);
+});
+
+test('a committed optional policy survives replanning a stocked child', () => {
+  const database = db(
+    [purchased('stockbase'), purchased('sprinkle'), made('relish'), made('platter')],
+    [
+      recipe('relish', 1000, [
+        { itemId: 'stockbase', qty: 1000, uom: 'g' },
+        { itemId: 'sprinkle', qty: 50, uom: 'g', optional: true },
+      ]),
+      recipe('platter', 1000, [{ itemId: 'relish', qty: 500, uom: 'g' }]),
+    ],
+  );
+  planned(database, 'platter', 1, '2026-07-04');
+  // With relish in stock, the optional-enabled commit raises no relish order.
+  receive(database, 'relish', { qty: 500, on: '2026-07-01' });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7, includeOptional: true }));
+  assert.ok(!database.productionOrders.some((o) => o.itemId === 'relish'), 'covered by the tub');
+
+  // The tub is eaten before the plan is cooked.
+  issue(database, 'relish', { qty: 500, on: '2026-07-02', ref: 'midnight-snack' });
+
+  // A later plain run replans the relish for the committed platter.
+  // Executing that commitment cooks the relish with its sprinkle, so the
+  // replacement run must buy the sprinkle — whatever flag this run uses.
+  const rerun = runMrp(database, { asOf: '2026-07-02', horizonDays: 7 });
+  const sprinkle = rerun.lines.find((line) => line.itemId === 'sprinkle');
+  assert.ok(sprinkle && close(sprinkle.gross, 25), `got ${sprinkle?.gross}`);
+
+  // And the replacement commitment snapshots the inherited policy, so the
+  // batch is eventually cooked exactly as it was planned and bought.
+  const orders = commitProduction(database, rerun);
+  const relishOrder = orders.find((o) => o.itemId === 'relish')!;
+  assert.equal(relishOrder.includeOptional, true);
 });
 
 test('stock of a made sub-recipe stops it being made again', () => {

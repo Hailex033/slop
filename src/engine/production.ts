@@ -62,7 +62,9 @@ export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
     else byDate.set(task.on, [task]);
   };
 
-  for (const planned of mrp.production) add(toPrepTask(db, planned, mrp.includeOptional));
+  // Each planned run carries its own policy — possibly stricter than the
+  // MRP run's flag, when it replaces a commitment made with the optionals.
+  for (const planned of mrp.production) add(toPrepTask(db, planned, planned.includeOptional ?? mrp.includeOptional));
 
   // Committed batches are supply to the planning run, so they no longer
   // appear in `mrp.production` — but somebody still has to cook them.

@@ -155,8 +155,14 @@ export function heading(text: string): string {
 // ---------------------------------------------------------------------------
 
 export interface TreeOptions {
-  /** Show cost per node. */
-  readonly costs?: Map<string, number>;
+  /**
+   * Per-node cost annotation, priced for the node's own gross quantity. A
+   * flat per-unit rate cannot be right here: a `scalable: false` component
+   * costs the same however many batches its node represents, so a node's
+   * cost is not linear in its quantity. Return undefined to leave a node
+   * unannotated.
+   */
+  readonly costOfNode?: (node: BomNode) => number | undefined;
   readonly currency?: string;
   /** Collapse below this depth. */
   readonly maxDepth?: number;
@@ -193,9 +199,9 @@ export function renderTree(root: BomNode, options: TreeOptions = {}): string {
     }
     if (node.line?.prep) notes.push(style(node.line.prep, 'italic', 'grey'));
 
-    const cost = options.costs?.get(node.itemId);
+    const cost = options.costOfNode?.(node);
     if (cost !== undefined && cost > 0) {
-      notes.push(style(money(cost * node.grossQty, options.currency), 'green'));
+      notes.push(style(money(cost, options.currency), 'green'));
     }
 
     lines.push({

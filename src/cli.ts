@@ -25,7 +25,7 @@ import { convert, parseQuantity, parseUom, type UomCode } from './domain/units.j
 import { MEAL_SLOTS } from './domain/types.js';
 import type { Database, ItemId, MealSlot } from './domain/types.js';
 import { seedDatabase } from './data/seed.js';
-import { aggregate, explode, quantityForServings, servingsForQuantity } from './engine/explode.js';
+import { aggregate, explode, quantityForServings, servingsForQuantity, type BomNode } from './engine/explode.js';
 import { findCycles, lowLevelCodes, recipeDepth, whereUsed } from './engine/graph.js';
 import {
   availableOn,
@@ -218,10 +218,27 @@ function costMap(db: Database, includeOptional = false): Map<string, number> {
     try {
       map.set(item.id, rollupUnitCost(db, item.id, { includeOptional }).total);
     } catch {
-      /* leave it out of the map; the tree simply won't annotate it */
+      /* leave it out of the map; the list simply won't annotate it */
     }
   }
   return map;
+}
+
+/**
+ * Per-node tree pricing: cost the node's own quantity, not unit rate × qty.
+ * A fixed component does not repeat per batch, so a two-batch node with one
+ * bay leaf inside costs one leaf — the same answer `mise cost` and the cook
+ * itself give. (The flat map above stays right for leaf tables: purchased
+ * items really are linear.)
+ */
+function nodeCoster(db: Database, includeOptional: boolean): (node: BomNode) => number | undefined {
+  return (node) => {
+    try {
+      return costOf(db, node.itemId, node.grossQty, node.uom, { includeOptional }).total;
+    } catch {
+      return undefined; // no conversion path — this node goes unannotated
+    }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +313,7 @@ const commands: Record<string, Command> = {
       out(
         f.renderTree(tree, {
           ...(boolFlag(ctx.args, 'cost')
-            ? { costs: costMap(ctx.db, boolFlag(ctx.args, 'optional')) }
+            ? { costOfNode: nodeCoster(ctx.db, boolFlag(ctx.args, 'optional')) }
             : {}),
           currency: ctx.db.settings.currency,
           ...(ctx.args.flags['depth'] ? { maxDepth: numberFlag(ctx.args, 'depth', 99) } : {}),

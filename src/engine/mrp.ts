@@ -97,6 +97,11 @@ export interface PlannedProduction {
   readonly passiveMin: number;
   readonly level: number;
   readonly pegging: readonly string[];
+  /**
+   * The optional policy this run was planned under. May be stricter than
+   * the MRP run's own flag when a covered demand carried a committed one.
+   */
+  readonly includeOptional?: boolean;
 }
 
 export interface MrpLine {
@@ -357,6 +362,12 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
       }
       const batchQty = convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item));
       for (const run of runs) {
+        // The run keeps the strictest promise among the demands it covers:
+        // a commitment made with its optional components will be *cooked*
+        // with them, so its replacement batch must plan them — time,
+        // ingredients and its own eventual commitment alike — whatever
+        // flag this particular planning run happens to use.
+        const runOptional = run.includeOptional === true || options.includeOptional === true;
         // Timing is per *run*, not per batch — see `runMinutes` — and it
         // includes the phantoms this run will make inline: the dough is
         // kneaded and rested on the sheets' clock, since it has no run of
@@ -367,7 +378,7 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
           item,
           recipe,
           batches,
-          options.includeOptional === true,
+          runOptional,
         );
 
         // Backward-schedule against a usable cooking day. A four-hour braise
@@ -399,10 +410,11 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
           passiveMin,
           level,
           pegging: run.sources,
+          includeOptional: runOptional,
         });
 
         // Dependent demand, due when production starts rather than when it ends.
-        explodeOneLevel(db, itemId, run.qty, startOn, level, run.sources, addDemand, options.includeOptional, reportMissing);
+        explodeOneLevel(db, itemId, run.qty, startOn, level, run.sources, addDemand, runOptional, reportMissing);
       }
       continue;
     }
@@ -459,6 +471,8 @@ interface OrderRun {
   qty: number;
   readonly dueOn: IsoDate;
   readonly sources: string[];
+  /** The strictest policy among the shortfalls merged into this run. */
+  includeOptional?: boolean;
 }
 
 /**
@@ -487,8 +501,16 @@ function batchShortfalls(
       for (const source of short.sources) {
         if (!current.sources.includes(source)) current.sources.push(source);
       }
+      // One batch, one policy: if any demand sharing the run was committed
+      // with its optional components, the whole batch is made with them.
+      if (short.includeOptional === true) current.includeOptional = true;
     } else {
-      runs.push({ qty: short.qty, dueOn: short.dueOn, sources: [...short.sources] });
+      runs.push({
+        qty: short.qty,
+        dueOn: short.dueOn,
+        sources: [...short.sources],
+        ...(short.includeOptional === true ? { includeOptional: true } : {}),
+      });
     }
   }
   return runs;
@@ -593,6 +615,9 @@ interface Shortfall {
   readonly qty: number;
   readonly dueOn: IsoDate;
   readonly sources: readonly string[];
+  /** True when the demand behind this shortfall carried a committed
+   *  include-optional policy — the replacement run must honour it. */
+  readonly includeOptional?: boolean;
 }
 
 interface Allocation {
@@ -629,7 +654,12 @@ function allocate(buckets: SupplyBucket[], requirements: readonly Demand[]): All
       else fromOrders += take;
     }
     if (remaining > 1e-9) {
-      shortfalls.push({ qty: remaining, dueOn: requirement.dueOn, sources: requirement.sources });
+      shortfalls.push({
+        qty: remaining,
+        dueOn: requirement.dueOn,
+        sources: requirement.sources,
+        ...(requirement.includeOptional === true ? { includeOptional: true } : {}),
+      });
     }
   }
 
@@ -788,9 +818,10 @@ export function commitProduction(db: Database, result: MrpResult): ProductionOrd
       dueOn: planned.dueOn,
       startOn: planned.startOn,
       status: 'open',
-      // The plan's optional policy travels with the commitment, so later
-      // runs and the eventual execution cook the batch that was planned.
-      includeOptional: result.includeOptional,
+      // The run's optional policy travels with the commitment, so later
+      // runs and the eventual execution cook the batch that was planned —
+      // including a policy inherited from the committed demand it replaces.
+      includeOptional: planned.includeOptional ?? result.includeOptional,
       ...(planned.pegging[0] ? { pegging: planned.pegging[0] } : {}),
     };
     created.push(order);
