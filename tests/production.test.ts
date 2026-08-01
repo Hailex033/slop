@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
 import { onHand, onOrder, receive } from '../src/engine/inventory.js';
-import { runMrp } from '../src/engine/mrp.js';
+import { commitProduction, runMrp } from '../src/engine/mrp.js';
 import { bySupplier, packsFor, raisePurchaseOrders, receivePurchaseOrder, shoppingList } from '../src/engine/procurement.js';
 import { cookableNow, feasibility, prepSchedule, produce, serve } from '../src/engine/production.js';
 import { MiseError, ShortageError } from '../src/domain/errors.js';
@@ -329,6 +329,27 @@ test('prep tasks within a day run deepest-first', () => {
   assert.ok(positionOf('ragu') < positionOf('lasagne'), 'the ragù before the lasagne');
   assert.ok(positionOf('besciamella') < positionOf('lasagne'));
   assert.ok(positionOf('pasta-sheets') < positionOf('lasagne'));
+});
+
+test('committed batches stay on the prep schedule', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+
+  // The next run rightly treats the committed batches as supply…
+  const second = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.equal(second.production.length, 0);
+
+  // …but they still have to be cooked, and in the right order.
+  const tasks = prepSchedule(database, second).flatMap((day) => day.tasks);
+  const position = (id: string) => tasks.findIndex((task) => task.itemId === id);
+
+  assert.ok(position('dish') >= 0, 'the committed dish is on the schedule');
+  assert.ok(position('sauce') >= 0, 'its committed sub-recipe too');
+  assert.ok(position('sauce') < position('dish'), 'deepest-first still holds');
+  const dish = tasks[position('dish')]!;
+  assert.ok(close(dish.qty, 1500), `got ${dish.qty}`);
 });
 
 test('feasibility ignores stock that has gone off', () => {

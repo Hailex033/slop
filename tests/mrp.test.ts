@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
 import { receive } from '../src/engine/inventory.js';
 import { commitProduction, runMrp } from '../src/engine/mrp.js';
-import { close, nestedDb } from './helpers.js';
+import { close, db, made, nestedDb, purchased, recipe } from './helpers.js';
 
 function planned(database: ReturnType<typeof nestedDb>, itemId: string, servings: number, date: string) {
   database.mealPlan.push({ id: `MP-${database.mealPlan.length + 1}`, date, slot: 'dinner', itemId, servings });
@@ -604,6 +604,34 @@ test('ignoring stock does not ignore commitments already made', () => {
   // 200 kg of roux, of which half is butter.
   const butter = rerun.purchases.find((line) => line.itemId === 'butter')!;
   assert.ok(close(butter.qty, 100_000), `got ${butter.qty}`);
+});
+
+test('a committed order straddling the horizon still buys its components', () => {
+  const database = db(
+    [purchased('flour'), made('bread')],
+    [
+      recipe('bread', 1000, [{ itemId: 'flour', qty: 600, uom: 'g' }], {
+        steps: [{ text: 'prove overnight, twice', passiveMin: 1440 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-08', slot: 'dinner', itemId: 'bread', servings: 1 });
+
+  // A fortnight-wide run commits the bake: due the 8th, started the 6th.
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 14 }));
+  const order = database.productionOrders[0]!;
+  assert.equal(order.startOn, '2026-07-06');
+  assert.equal(order.dueOn, '2026-07-08');
+
+  // A one-week view ends on the 7th: the bake starts inside it, finishes
+  // beyond it. The flour still has to be bought this week.
+  const week = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const flour = week.purchases.find((line) => line.itemId === 'flour')!;
+
+  assert.ok(flour, 'the straddling order still demands its components');
+  assert.ok(close(flour.qty, 600), `got ${flour.qty}`);
+  assert.equal(flour.neededOn, '2026-07-06', 'wanted when the cooking starts');
+  assert.equal(week.production.length, 0, 'and nothing is planned twice');
 });
 
 test('a buffer that is already short is wanted today, not on the last day', () => {

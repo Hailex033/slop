@@ -617,7 +617,13 @@ function schedulePurchase(
  */
 function firmProductionOrders(db: Database, itemId: ItemId, until: IsoDate): ProductionOrder[] {
   return db.productionOrders.filter(
-    (order) => order.status === 'open' && order.itemId === itemId && order.dueOn <= until,
+    // An order whose cooking *starts* inside the window belongs to this run
+    // even when it finishes beyond it — the mince still has to be bought this
+    // week. Filtering on dueOn dropped exactly those straddlers, and their
+    // ingredients with them. The output side needs no special case: the
+    // supply bucket opens at `dueOn`, so a straddler supplies nothing to any
+    // demand that falls inside this horizon.
+    (order) => order.status === 'open' && order.itemId === itemId && order.startOn <= until,
   );
 }
 

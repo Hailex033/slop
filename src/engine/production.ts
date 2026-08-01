@@ -10,12 +10,13 @@
  */
 
 import { conversionContext, findItem, isMade, isStocked, mustItem, recipeFor } from '../domain/db.js';
-import { today, type IsoDate } from '../domain/date.js';
+import { addDays, today, type IsoDate } from '../domain/date.js';
 import { MiseError, NotFoundError } from '../domain/errors.js';
 import { convert } from '../domain/units.js';
 import { nextId } from '../domain/ids.js';
 import type { Database, ItemId, ProductionOrder } from '../domain/types.js';
 import { quantityForServings, servingsForQuantity } from './explode.js';
+import { lowLevelCodes } from './graph.js';
 import { availableOn, isUsableOn, issue, receive, transactionally } from './inventory.js';
 import type { MrpResult, PlannedProduction } from './mrp.js';
 import { runMinutes } from './rollup.js';
@@ -55,12 +56,25 @@ export interface PrepDay {
  */
 export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
   const byDate = new Map<IsoDate, PrepTask[]>();
-
-  for (const planned of mrp.production) {
-    const task = toPrepTask(db, planned);
+  const add = (task: PrepTask): void => {
     const list = byDate.get(task.on);
     if (list) list.push(task);
     else byDate.set(task.on, [task]);
+  };
+
+  for (const planned of mrp.production) add(toPrepTask(db, planned));
+
+  // Committed batches are supply to the planning run, so they no longer
+  // appear in `mrp.production` — but somebody still has to cook them.
+  // Without this, `mrp --commit` followed by `prep` says "nothing to cook"
+  // while the order book is full. Every open order whose cooking falls
+  // inside the window joins the schedule alongside the newly planned work.
+  const horizonEnd = addDays(mrp.asOf, mrp.horizonDays - 1);
+  const codes = lowLevelCodes(db);
+  for (const order of db.productionOrders) {
+    if (order.status !== 'open') continue;
+    if (order.startOn > horizonEnd || order.dueOn < mrp.asOf) continue;
+    add(firmPrepTask(db, order, codes.get(order.itemId) ?? 0));
   }
 
   return [...byDate.entries()]
@@ -74,6 +88,33 @@ export function prepSchedule(db: Database, mrp: MrpResult): PrepDay[] {
       };
     })
     .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/** A prep task reconstructed from a firm order rather than a fresh plan. */
+function firmPrepTask(db: Database, order: ProductionOrder, level: number): PrepTask {
+  const item = mustItem(db, order.itemId);
+  const recipe = recipeFor(db, order.itemId);
+  const batchQty = recipe
+    ? convert(recipe.yieldQty, recipe.yieldUom, item.stockUom, conversionContext(item))
+    : 0;
+  const batches = recipe && batchQty > 0 ? order.qty / batchQty : 0;
+  // Same batch policy as planning used when the order was cut: hands-on
+  // scales with batches, unattended does not.
+  const minutes = recipe ? runMinutes(recipe, batches) : { active: 0, passive: 0, total: 0 };
+
+  return {
+    itemId: order.itemId,
+    name: item.name,
+    qty: order.qty,
+    uom: item.stockUom,
+    servings: recipe ? batches * recipe.servings : 0,
+    on: order.startOn,
+    dueOn: order.dueOn,
+    activeMin: minutes.active,
+    passiveMin: minutes.passive,
+    level,
+    steps: (recipe?.steps ?? []).map((step) => step.text),
+  };
 }
 
 function toPrepTask(db: Database, planned: PlannedProduction): PrepTask {
