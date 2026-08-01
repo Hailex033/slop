@@ -147,11 +147,14 @@ export function demandFromPlan(
 ): Demand[] {
   const until = addDays(from, horizonDays - 1);
   return entries
-    // A served entry is history, not demand — the food is already eaten.
-    .filter((entry) => !entry.servedOn && entry.date >= from && entry.date <= until)
-    .map((entry) => ({
+    .filter((entry) => entry.date >= from && entry.date <= until)
+    // Demand is what remains to be served. A fully served entry is history;
+    // a partially served one still wants its other portions.
+    .map((entry) => ({ entry, remaining: entry.servings - (entry.servedServings ?? 0) }))
+    .filter(({ remaining }) => remaining > 1e-9)
+    .map(({ entry, remaining }) => ({
       itemId: entry.itemId,
-      qty: quantityForServings(db, entry.itemId, entry.servings).qty,
+      qty: quantityForServings(db, entry.itemId, remaining).qty,
       dueOn: entry.date,
       sources: [entry.id],
       level: 0,

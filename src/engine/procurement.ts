@@ -223,6 +223,12 @@ export function raisePurchaseOrders(
     // turn "no price on file" into a free purchase and a zero-cost receipt.
     // It stays on the list's unresolved report until the data is fixed.
     if (!line.supplierId || line.packs <= 0 || line.problem) continue;
+    // A late line is a conflict, not an order either: its delivery cannot
+    // serve the demand it was planned for, so the next run re-plans the same
+    // shortfall — and each further commit would raise another identical PO
+    // for food that still arrives too late. The conflict stays visible until
+    // the plan is changed (shop earlier, or eat later).
+    if (line.late) continue;
     const leadTimeDays = leadTimeFor(db, line.itemId);
     const key = `${line.supplierId}@${line.orderBy}@${leadTimeDays}`;
     const trip = trips.get(key);

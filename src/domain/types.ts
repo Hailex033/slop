@@ -202,9 +202,15 @@ export interface MealPlanEntry {
   readonly itemId: ItemId;
   readonly servings: number;
   /**
-   * Set when the meal has actually been served. A served entry is history,
-   * not demand: without this, serving tonight's dinner and re-running MRP
-   * planned a replacement batch for food already eaten.
+   * Servings already served against this entry. Demand is what remains:
+   * one portion eaten from a six-portion entry leaves five to plan for,
+   * not zero — an all-or-nothing flag retired the other five.
+   */
+  servedServings?: number;
+  /**
+   * Set when the entry is fully served. History, not demand: without this,
+   * serving tonight's dinner and re-running MRP planned a replacement batch
+   * for food already eaten.
    */
   servedOn?: IsoDate;
   readonly note?: string;

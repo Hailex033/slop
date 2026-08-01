@@ -660,22 +660,41 @@ export function serve(
   if (!(servings > 0)) {
     throw new MiseError(`Cannot serve ${servings} of "${mustItem(db, itemId).name}".`);
   }
+
+  const on = options.on ?? today();
+  const remainingOf = (entry: { servings: number; servedServings?: number }): number =>
+    entry.servings - (entry.servedServings ?? 0);
+
+  // An explicit plan entry is validated *before* anything moves: a stale or
+  // mistaken id must not silently retire a different dish's demand — and
+  // discovering that after the food is issued would be too late to refuse.
+  let entry;
+  if (options.planEntryId !== undefined) {
+    entry = db.mealPlan.find((candidate) => candidate.id === options.planEntryId);
+    if (!entry || entry.itemId !== itemId || remainingOf(entry) <= 1e-9) {
+      throw new MiseError(
+        `Plan entry "${options.planEntryId}" is not an unserved entry for "${mustItem(db, itemId).name}".`,
+      );
+    }
+  } else {
+    entry = db.mealPlan
+      .filter((candidate) => candidate.itemId === itemId && remainingOf(candidate) > 1e-9 && candidate.date <= on)
+      .sort((a, b) => a.date.localeCompare(b.date))[0];
+  }
+
   // Cook-and-eat is one operation: if the cooking fails, the ingredients it
   // had already taken go back on the shelf, exactly as for `produce`.
   const result = transactionally(db, () => serveInner(db, itemId, servings, options));
 
-  // Only after the serve has actually happened: the plan entry it fulfils is
-  // history now, not demand — otherwise the next planning run would buy and
-  // cook a replacement for food already eaten. Deliberately outside the
-  // transaction boundary, so a failed serve leaves the plan intact.
-  const on = options.on ?? today();
-  const entry = options.planEntryId
-    ? db.mealPlan.find((candidate) => candidate.id === options.planEntryId && !candidate.servedOn)
-    : db.mealPlan
-        .filter((candidate) => candidate.itemId === itemId && !candidate.servedOn && candidate.date <= on)
-        .sort((a, b) => a.date.localeCompare(b.date))[0];
+  // Only after the serve has actually happened: what was eaten stops being
+  // demand — otherwise the next planning run would buy and cook a
+  // replacement. Deliberately outside the transaction boundary, so a failed
+  // serve leaves the plan intact. Portions count: one plate from a
+  // six-portion entry leaves five still planned, and the entry only becomes
+  // history when the last of them goes.
   if (entry) {
-    entry.servedOn = on;
+    entry.servedServings = Math.min(entry.servings, (entry.servedServings ?? 0) + servings);
+    if (remainingOf(entry) <= 1e-9) entry.servedOn = on;
     return { ...result, servedPlanEntryId: entry.id };
   }
   return result;

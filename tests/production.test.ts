@@ -65,21 +65,41 @@ test('the shopping list says what each line is for', () => {
 test('a purchase order is stamped for the day the shop is actually open', () => {
   const database = nestedDb();
   database.suppliers = [{ id: 'shop', name: 'Saturday market', leadTimeDays: 0, deliveryDays: [6] }];
-  database.mealPlan.push({ id: 'MP-1', date: '2026-07-09', slot: 'dinner', itemId: 'cheese', servings: 200 });
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-12', slot: 'dinner', itemId: 'cheese', servings: 200 });
 
   const mrp = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
-  const list = shoppingList(database, mrp);
-  const [order] = raisePurchaseOrders(database, list, '2026-07-06');
+  const [order] = raisePurchaseOrders(database, shoppingList(database, mrp), '2026-07-06');
 
-  // The Thursday meal cannot be supplied; the next market day is Saturday 11th.
+  // The Sunday meal is shopped on Saturday the 11th — the market's day.
   assert.ok(order);
   assert.equal(order.expectedOn, '2026-07-11');
 
-  // And committing must not make the conflict disappear: the delivery still
-  // lands after the meal, so the next run says so just as loudly.
+  // The committed inbound covers the meal on the next run.
   const after = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
-  assert.equal(after.lines.find((line) => line.itemId === 'cheese')!.onOrder, 0);
-  assert.equal(after.conflicts.length, 1);
+  assert.ok(close(after.lines.find((line) => line.itemId === 'cheese')!.onOrder, 200));
+  assert.deepEqual(after.conflicts, []);
+});
+
+test('a late line is a conflict to resolve, not an order to repeat', () => {
+  const database = nestedDb();
+  database.suppliers = [{ id: 'shop', name: 'Saturday market', leadTimeDays: 0, deliveryDays: [6] }];
+  // Thursday the 9th, with no Saturday before it: the market cannot serve it.
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-09', slot: 'dinner', itemId: 'cheese', servings: 200 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-06', horizonDays: 14 }));
+  assert.equal(list.lines[0]!.late, true);
+
+  // Committing a delivery that misses its meal buys food twice: the order
+  // cannot serve the demand, so the next run re-plans the same shortfall —
+  // and would commit it again, and again.
+  assert.deepEqual(raisePurchaseOrders(database, list, '2026-07-06'), []);
+  const rerun = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
+  assert.equal(rerun.conflicts.length, 1, 'the decision stays on the table');
+  assert.deepEqual(
+    raisePurchaseOrders(database, shoppingList(database, rerun), '2026-07-06'),
+    [],
+    'no amount of committing creates a second order',
+  );
 });
 
 test('a pack-size edit after ordering does not change what was ordered', () => {
@@ -172,6 +192,44 @@ test('serving a planned meal retires its demand', () => {
   const later = serve(database, 'dish', 4, { on: '2026-07-03', allowShortages: true });
   assert.equal(later.servedPlanEntryId, undefined, 'nothing due on or before the 3rd matches');
   assert.equal(database.mealPlan.find((e) => e.id === 'MP-2')!.servedOn, undefined);
+});
+
+test('a partial serving retires only the portions eaten', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 6 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+
+  serve(database, 'dish', 2, { on: '2026-07-02' });
+  const entry = database.mealPlan[0]!;
+  assert.equal(entry.servedServings, 2);
+  assert.equal(entry.servedOn, undefined, 'four portions are still owed');
+
+  // Planning still wants the remaining four — not zero, not six.
+  const rerun = runMrp(database, { asOf: '2026-07-02', horizonDays: 7 });
+  const run = rerun.production.find((o) => o.itemId === 'dish')!;
+  assert.ok(close(run.qty, 1500), `got ${run.qty}`);
+
+  serve(database, 'dish', 4, { on: '2026-07-03' });
+  assert.equal(entry.servedOn, '2026-07-03', 'now it is history');
+  assert.ok(!runMrp(database, { asOf: '2026-07-03', horizonDays: 7 }).production.some((o) => o.itemId === 'dish'));
+});
+
+test('an explicit plan entry must match the dish being served', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'cheese', servings: 100 });
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 500, on: '2026-06-30' });
+
+  const ledgerBefore = database.ledger.length;
+  assert.throws(
+    () => serve(database, 'dish', 4, { on: '2026-07-02', planEntryId: 'MP-1' }),
+    /not an unserved entry for/,
+  );
+  assert.equal(database.ledger.length, ledgerBefore, 'refused before anything moved');
+  assert.equal(database.mealPlan[0]!.servedServings, undefined, 'the cheese entry is untouched');
 });
 
 test('a committed plan keeps its optional policy', () => {

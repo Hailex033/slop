@@ -684,8 +684,11 @@ const commands: Record<string, Command> = {
       // Same inclusive window as MRP: a 7-day horizon is today plus six, so
       // the plan shown here and the plan `mrp`/`shop`/`prep` act on agree
       // about which entries are in scope.
+      // The same predicate demandFromPlan uses: a fully served meal is
+      // history, and listing it in the upcoming count and food-cost total
+      // would disagree with the planning that already considers it done.
       const entries = ctx.db.mealPlan
-        .filter((entry) => entry.date >= from && entry.date <= addDays(from, horizon - 1))
+        .filter((entry) => !entry.servedOn && entry.date >= from && entry.date <= addDays(from, horizon - 1))
         .sort((a, b) => a.date.localeCompare(b.date) || a.slot.localeCompare(b.slot));
 
       out(f.heading('Meal plan'));
@@ -1154,7 +1157,7 @@ const commands: Record<string, Command> = {
       out(f.heading('Household'));
       out();
       out(`  Pantry value       ${f.money(stockValue(ctx.db), currency)} across ${stockReport(ctx.db).length} items`);
-      out(`  Planned meals      ${ctx.db.mealPlan.filter((e) => e.date >= today()).length} upcoming`);
+      out(`  Planned meals      ${ctx.db.mealPlan.filter((e) => !e.servedOn && e.date >= today()).length} upcoming`);
       out(`  To buy             ${list.lines.length} lines, ${f.money(list.total, currency)}`);
       // Committed batches are supply to the planning run, not entries in
       // mrp.production — but they are still outstanding cooking, exactly as
@@ -1166,7 +1169,7 @@ const commands: Record<string, Command> = {
           (soon.length > 0 ? f.style(` (${soon.map((s) => s.item.name).slice(0, 4).join(', ')})`, 'grey') : ''),
       );
 
-      const meals = ctx.db.mealPlan.filter((e) => e.date >= today());
+      const meals = ctx.db.mealPlan.filter((e) => !e.servedOn && e.date >= today());
       const weekCost = meals.reduce((sum, entry) => {
         const target = quantityForServings(ctx.db, entry.itemId, entry.servings);
         return sum + costOf(ctx.db, entry.itemId, target.qty, target.uom).total;
