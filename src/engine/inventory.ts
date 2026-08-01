@@ -352,10 +352,13 @@ export function transactionally<T>(db: Database, work: () => T): T {
   const lots = [...db.lots];
   const quantities = lots.map((lot) => lot.qty);
   const ledgerLength = db.ledger.length;
-  // A cascade can settle a committed order as done mid-cook; if the cook then
-  // fails, the order has to come back too, or the batch it stands for would
-  // never be made.
-  const productionStatuses = db.productionOrders.map((order) => order.status);
+  // A cascade can settle a committed order mid-cook — closing it outright or
+  // reducing its quantity. If the cook then fails, both have to come back,
+  // or the batch the order stands for would never (fully) be made.
+  const productionSnapshots = db.productionOrders.map((order) => ({
+    status: order.status,
+    qty: order.qty,
+  }));
   const purchaseStatuses = db.purchaseOrders.map((order) => order.status);
 
   try {
@@ -368,8 +371,9 @@ export function transactionally<T>(db: Database, work: () => T): T {
       lot.qty = quantities[index]!;
     });
     db.ledger.length = ledgerLength;
-    productionStatuses.forEach((status, index) => {
-      db.productionOrders[index]!.status = status;
+    productionSnapshots.forEach((snapshot, index) => {
+      db.productionOrders[index]!.status = snapshot.status;
+      db.productionOrders[index]!.qty = snapshot.qty;
     });
     purchaseStatuses.forEach((status, index) => {
       db.purchaseOrders[index]!.status = status;

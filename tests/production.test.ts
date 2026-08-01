@@ -371,6 +371,64 @@ test('a failed cook puts settled child orders back', () => {
   assert.equal(onHand(database, 'butter'), 500, 'and so did the butter');
 });
 
+test('a cascade covering part of a child order reduces it; the rest settles later', () => {
+  const database = nestedDb();
+  // A one-day shelf life keeps the two dishes as separate runs, while the
+  // sauce — which keeps — merges into a single committed order serving both.
+  database.items = database.items.map((item) =>
+    item.id === 'dish' ? { ...item, shelfLifeDays: 1 } : item,
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-06', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const dishOrders = database.productionOrders
+    .filter((o) => o.itemId === 'dish')
+    .sort((a, b) => a.dueOn.localeCompare(b.dueOn));
+  const sauceOrder = database.productionOrders.find((o) => o.itemId === 'sauce')!;
+  assert.equal(dishOrders.length, 2);
+  assert.ok(close(sauceOrder.qty, 2000), 'one merged commitment for both meals');
+
+  // First dinner cascades 1000 g of sauce — half the commitment. That half
+  // went straight into the dish, so no lot remains to reconcile: the order
+  // itself must shrink.
+  executeOrder(database, dishOrders[0]!.id, { on: '2026-07-03' });
+  assert.equal(sauceOrder.status, 'open', 'half a commitment is still a commitment');
+  assert.ok(close(sauceOrder.qty, 1000), `got ${sauceOrder.qty}`);
+
+  // The second dinner cooks the remainder and closes it.
+  executeOrder(database, dishOrders[1]!.id, { on: '2026-07-06' });
+  assert.equal(sauceOrder.status, 'received');
+});
+
+test('cooking a recipe with a deleted component is refused, not quietly abridged', () => {
+  const database = nestedDb();
+  database.items = database.items.filter((item) => item.id !== 'cheese');
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+
+  // Not a shortage — the item does not exist. Cooking around the hole would
+  // book a full dish that never contained its cheese.
+  assert.throws(() => produce(database, 'dish', 1500, { on: '2026-07-01' }), /unknown item "cheese"/);
+  assert.equal(onHand(database, 'butter'), 500, 'the sauce it had already made was rolled back');
+});
+
+test('feasibility keeps counting past the old search ceiling', () => {
+  const database = db(
+    [purchased('oats'), made('porridge')],
+    [recipe('porridge', 100, [{ itemId: 'oats', qty: 1, uom: 'g' }])],
+  );
+  receive(database, 'oats', { qty: 100_000, on: '2026-07-01' });
+
+  // 1 g per serving and 100 kg in the house: the answer is 100 000, not the
+  // 512 the old eight-doubling search bound topped out at.
+  const result = feasibility(database, 'porridge', undefined, '2026-07-02');
+  assert.ok(Math.abs(result.servings - 100_000) < 1, `got ${result.servings}`);
+});
+
 test('committed batches stay on the prep schedule', () => {
   const database = nestedDb();
   database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });

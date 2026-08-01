@@ -229,8 +229,13 @@ export interface PurchaseOrder {
 export interface ProductionOrder {
   readonly id: string;
   readonly itemId: ItemId;
-  /** Quantity to make, in the item's `stockUom`. */
-  readonly qty: number;
+  /**
+   * Quantity still to make, in the item's `stockUom`. Mutable for the same
+   * reason a lot's quantity is: a cascade that fulfils *part* of this order
+   * has already fed that part to its parent, so the remaining commitment is
+   * genuinely smaller.
+   */
+  qty: number;
   readonly dueOn: IsoDate;
   readonly startOn: IsoDate;
   status: OrderStatus;

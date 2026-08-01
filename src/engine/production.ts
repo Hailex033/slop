@@ -281,13 +281,19 @@ function maxFeasibleServings(
   let high = probe;
   if (ok(probe)) {
     // We can already do the probe; find out how much further stock stretches.
+    // Keep doubling until the answer is "no" — stopping while it is still
+    // "yes" would report the search bound as the limit, telling someone with
+    // stock for a thousand servings that they can make 512. Forty doublings
+    // is a factor of 10^12: a recipe still feasible there consumes
+    // effectively nothing per serving, and the bound is as honest an answer
+    // as any finite number.
     low = probe;
     high = probe * 2;
-    for (let i = 0; i < 8 && ok(high); i += 1) {
+    for (let i = 0; ok(high); i += 1) {
+      if (i >= 40) return high;
       low = high;
       high *= 2;
     }
-    if (ok(high)) return high;
   }
 
   for (let i = 0; i < 24 && high - low > 1e-4; i += 1) {
@@ -453,7 +459,16 @@ function produceInner(
   for (const component of recipe.components) {
     if (component.optional && !includeOptional) continue;
     const child = findItem(db, component.itemId);
-    if (!child) continue;
+    if (!child) {
+      // Explosion tolerates a dangling reference so a broken database can
+      // still be inspected; production moves real stock and must not cook a
+      // recipe with a hole in it — half the ingredients issued, full output
+      // booked, no shortage reported. Throwing rolls the whole batch back.
+      throw new MiseError(
+        `Recipe for "${item.name}" calls for unknown item "${component.itemId}" — ` +
+          `fix the data (mise doctor) before cooking.`,
+      );
+    }
 
     const scaled = component.scalable === false ? component.qty : component.qty * batches;
     const net = convert(scaled, component.uom, child.stockUom, conversionContext(child));
@@ -618,9 +633,10 @@ function serveInner(
  *
  * Orders are settled earliest-due-first, and only those whose cooking window
  * has already opened (`startOn <= on`) — those are the ones somebody would
- * otherwise execute today and cook twice. An order only partially covered
- * stays open: its remainder genuinely still needs making, and the next
- * planning run reconciles the overlap against the freshly booked lot.
+ * otherwise execute today and cook twice. An order only partially covered is
+ * *reduced*, not left standing: the cascaded output went straight into the
+ * parent, so there is no lot for a later planning run to reconcile — the
+ * remainder is the only part of the commitment still real.
  */
 function settleCommittedOrders(db: Database, itemId: ItemId, cooked: number, on: IsoDate): void {
   let remaining = cooked;
@@ -629,9 +645,14 @@ function settleCommittedOrders(db: Database, itemId: ItemId, cooked: number, on:
     .sort((a, b) => a.dueOn.localeCompare(b.dueOn));
 
   for (const order of open) {
-    if (remaining + 1e-9 < order.qty) break;
-    order.status = 'received';
-    remaining -= order.qty;
+    if (remaining <= 1e-9) break;
+    if (remaining + 1e-9 >= order.qty) {
+      remaining -= order.qty;
+      order.status = 'received';
+    } else {
+      order.qty -= remaining;
+      remaining = 0;
+    }
   }
 }
 
