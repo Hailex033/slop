@@ -371,8 +371,17 @@ export function validate(db: Database): string[] {
     }
   }
   for (const entry of db.mealPlan) {
-    if (!findItem(db, entry.itemId)) {
+    const planned = findItem(db, entry.itemId);
+    if (!planned) {
       issues.push(`Meal plan entry "${entry.id}" references unknown item "${entry.itemId}".`);
+    } else if (planned.sourcing === 'phantom') {
+      // A phantom is never stocked, so the entry can never be served: its
+      // demand would out-live every shop and every cook, quietly poisoning
+      // each planning run with a dinner that cannot happen.
+      issues.push(
+        `Meal plan entry "${entry.id}" plans "${planned.name}", a phantom — ` +
+          `phantoms are made inline and cannot be served; plan a dish that uses it.`,
+      );
     }
     if (entry.servings <= 0) issues.push(`Meal plan entry "${entry.id}" has non-positive servings.`);
     if (!MEAL_SLOTS.includes(entry.slot)) {

@@ -216,6 +216,50 @@ test('a partial serving retires only the portions eaten', () => {
   assert.ok(!runMrp(database, { asOf: '2026-07-03', horizonDays: 7 }).production.some((o) => o.itemId === 'dish'));
 });
 
+test('a serving that spans several due entries retires them earliest-first', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-01', slot: 'lunch', itemId: 'dish', servings: 2 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 2 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+
+  // Yesterday's skipped lunch and tonight's dinner, eaten as one sitting.
+  // The overflow must reach the second entry — capped at the first, the
+  // extra portion would stay demand and be cooked again although eaten.
+  const result = serve(database, 'dish', 3, { on: '2026-07-02' });
+  assert.equal(result.servedPlanEntryId, 'MP-1', 'reported against the earliest entry');
+
+  const first = database.mealPlan.find((e) => e.id === 'MP-1')!;
+  const second = database.mealPlan.find((e) => e.id === 'MP-2')!;
+  assert.equal(first.servedOn, '2026-07-02', 'the earliest retired in full');
+  assert.equal(second.servedServings, 1, 'the spill lands on the next one');
+  assert.equal(second.servedOn, undefined, 'which still owes a portion');
+
+  // Planning wants exactly the one outstanding portion — not three, not zero.
+  const rerun = runMrp(database, { asOf: '2026-07-02', horizonDays: 7 });
+  const run = rerun.production.find((o) => o.itemId === 'dish')!;
+  assert.ok(close(run.qty, 375), `got ${run.qty}`);
+});
+
+test('an explicit plan entry keeps a big serving to itself', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-01', slot: 'lunch', itemId: 'dish', servings: 2 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 2 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+
+  // Four portions against a named two-portion entry: the extra two are
+  // seconds, not a licence to quietly retire the other meal's demand.
+  serve(database, 'dish', 4, { on: '2026-07-02', planEntryId: 'MP-2' });
+
+  assert.equal(database.mealPlan.find((e) => e.id === 'MP-2')!.servedOn, '2026-07-02');
+  const other = database.mealPlan.find((e) => e.id === 'MP-1')!;
+  assert.equal(other.servedServings, undefined, 'the unnamed entry is untouched');
+  assert.equal(other.servedOn, undefined);
+});
+
 test('a legacy fully-served entry stays history without a quantity', () => {
   const database = nestedDb();
   // Data written before servedServings existed: the completion marker alone.

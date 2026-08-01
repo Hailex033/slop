@@ -212,6 +212,22 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
 
   const horizonEnd = addDays(asOf, horizonDays - 1);
 
+  // A plan entry for a phantom can never be fulfilled: phantoms are never
+  // stocked, so there is nothing to cook into stock and nothing to serve.
+  // Left unflagged, the run would happily buy the ingredients for a dinner
+  // that cannot happen — and the entry's demand would outlive every shop.
+  for (const entry of db.mealPlan) {
+    if (entry.date < asOf || entry.date > horizonEnd) continue;
+    if (remainingServings(entry) <= 1e-9) continue;
+    const planned = findItem(db, entry.itemId);
+    if (planned && planned.sourcing === 'phantom') {
+      problems.push(
+        `Meal plan entry "${entry.id}" plans "${planned.name}", a phantom that ` +
+          `cannot be stocked or served — plan a dish that uses it (mise doctor).`,
+      );
+    }
+  }
+
   for (const itemId of order) {
     const item = mustItem(db, itemId);
     const demands = demandsByItem.get(itemId) ?? [];

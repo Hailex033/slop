@@ -14,7 +14,7 @@ import { addDays, maxDate, today, type IsoDate } from '../domain/date.js';
 import { CycleError, MiseError, NotFoundError } from '../domain/errors.js';
 import { convert } from '../domain/units.js';
 import { nextId } from '../domain/ids.js';
-import type { Database, ItemId, ProductionOrder } from '../domain/types.js';
+import type { Database, ItemId, MealPlanEntry, ProductionOrder } from '../domain/types.js';
 import { quantityForServings, servingsForQuantity } from './explode.js';
 import { lowLevelCodes } from './graph.js';
 import { availableOn, isUsableOn, issue, receive, transactionally } from './inventory.js';
@@ -444,7 +444,10 @@ export interface ProductionResult {
   readonly lotId?: string;
   readonly shortages: readonly Shortage[];
   readonly minutes: number;
-  /** The meal plan entry this serving fulfilled, when one matched. */
+  /**
+   * The earliest meal plan entry this serving fulfilled, when any matched.
+   * A serving bigger than one entry retires the following due entries too.
+   */
   readonly servedPlanEntryId?: string;
 }
 
@@ -676,21 +679,24 @@ export function serve(
   // An explicit plan entry is validated *before* anything moves: a stale or
   // mistaken id must not silently retire a different dish's demand — and
   // discovering that after the food is issued would be too late to refuse.
-  let entry;
+  let entries: MealPlanEntry[];
   if (options.planEntryId !== undefined) {
-    entry = db.mealPlan.find((candidate) => candidate.id === options.planEntryId);
+    const entry = db.mealPlan.find((candidate) => candidate.id === options.planEntryId);
     if (!entry || entry.itemId !== itemId || remainingServings(entry) <= 1e-9) {
       throw new MiseError(
         `Plan entry "${options.planEntryId}" is not an unserved entry for "${mustItem(db, itemId).name}".`,
       );
     }
+    // Explicit is explicit: portions beyond this entry are seconds, not a
+    // licence to retire other meals' demand.
+    entries = [entry];
   } else {
-    entry = db.mealPlan
+    entries = db.mealPlan
       .filter(
         (candidate) =>
           candidate.itemId === itemId && remainingServings(candidate) > 1e-9 && candidate.date <= on,
       )
-      .sort((a, b) => a.date.localeCompare(b.date))[0];
+      .sort((a, b) => a.date.localeCompare(b.date));
   }
 
   // Cook-and-eat is one operation: if the cooking fails, the ingredients it
@@ -702,12 +708,20 @@ export function serve(
   // replacement. Deliberately outside the transaction boundary, so a failed
   // serve leaves the plan intact. Portions count: one plate from a
   // six-portion entry leaves five still planned, and the entry only becomes
-  // history when the last of them goes.
-  if (entry) {
-    entry.servedServings = Math.min(entry.servings, (entry.servedServings ?? 0) + servings);
+  // history when the last of them goes. A serving that spans entries walks
+  // them earliest-first — four portions against two two-portion dinners
+  // retires both, not one plus two portions lost to the cap.
+  let left = servings;
+  let firstServedId: string | undefined;
+  for (const entry of entries) {
+    if (left <= 1e-9) break;
+    const portion = Math.min(remainingServings(entry), left);
+    entry.servedServings = Math.min(entry.servings, (entry.servedServings ?? 0) + portion);
     if (remainingServings(entry) <= 1e-9) entry.servedOn = on;
-    return { ...result, servedPlanEntryId: entry.id };
+    firstServedId ??= entry.id;
+    left -= portion;
   }
+  if (firstServedId !== undefined) return { ...result, servedPlanEntryId: firstServedId };
   return result;
 }
 

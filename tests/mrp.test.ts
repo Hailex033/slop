@@ -43,6 +43,22 @@ test('phantoms pass demand straight through without being stocked or ordered', (
   assert.ok(result.lines.some((line) => line.itemId === 'butter' && line.gross > 0));
 });
 
+test('a phantom on the meal plan is a problem, not a shopping trip', () => {
+  const database = nestedDb();
+  // A hand-edited file plans the roux itself. It can never be served —
+  // phantoms cannot be stocked — so buying its butter and flour would fund
+  // a dinner that cannot happen.
+  planned(database, 'roux', 2, '2026-07-02');
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(
+    result.problems.some((p) => p.includes('MP-1') && p.includes('phantom')),
+    JSON.stringify(result.problems),
+  );
+  // Problems block the commit, so the poisoned plan cannot reach the order book.
+  assert.throws(() => commitProduction(database, result), /problems/);
+});
+
 test('stock of a made sub-recipe stops it being made again', () => {
   const database = nestedDb();
   planned(database, 'dish', 4, '2026-07-02');

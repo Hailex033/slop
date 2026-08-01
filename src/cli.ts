@@ -676,6 +676,14 @@ const commands: Record<string, Command> = {
         if (!(MEAL_SLOTS as readonly string[]).includes(rawSlot)) {
           throw new MiseError(`Unknown slot "${rawSlot}". Use one of: ${MEAL_SLOTS.join(', ')}.`);
         }
+        // A phantom is never stocked, so a plan entry for one could never be
+        // cooked into stock or served: MRP would buy its ingredients for a
+        // dinner that cannot happen, and the entry would sit as demand forever.
+        if (item.sourcing === 'phantom') {
+          throw new MiseError(
+            `"${item.name}" is a phantom sub-recipe, made inline by the dishes that use it — plan one of those instead.`,
+          );
+        }
         const entry = {
           id: nextId('MP', ctx.db.mealPlan),
           date: parseDate(rawDate),
