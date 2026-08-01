@@ -707,8 +707,9 @@ const commands: Record<string, Command> = {
         const servings = rawServings ? parseQuantity(rawServings) : householdServings(ctx.db);
         // Zero would persist too: the plan would show a meal, MRP would
         // silently skip it, and doctor would call the file invalid — all
-        // from one well-formed command.
-        if (!(servings > 0)) {
+        // from one well-formed command. Infinity — a mangled household
+        // appetite summed into the default — serialises to null.
+        if (!Number.isFinite(servings) || servings <= 0) {
           throw new MiseError(`A meal needs a positive number of servings, not ${servings}.`);
         }
         // "supper" would persist, survive saves, and pass doctor — a typo

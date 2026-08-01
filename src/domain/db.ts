@@ -251,6 +251,21 @@ export function validate(db: Database): string[] {
 
   // The supplier index keeps one entry per id, so a silent duplicate means
   // purchase names and delivery-day scheduling depend on array order.
+  // Settings feed defaults and rates everywhere, so a mangled number here
+  // surfaces far from its cause — null servings on a saved plan entry, NaN
+  // in every cost. (A zero appetite eats nothing and harms nothing.)
+  for (const member of db.settings.household) {
+    if (!Number.isFinite(member.appetite) || member.appetite < 0) {
+      issues.push(`Household member "${member.name}" has an invalid appetite of ${member.appetite}.`);
+    }
+  }
+  if (!Number.isFinite(db.settings.overheadPerHour) || db.settings.overheadPerHour < 0) {
+    issues.push(`Settings overheadPerHour is invalid (${db.settings.overheadPerHour}).`);
+  }
+  if (!Number.isInteger(db.settings.planningHorizonDays) || db.settings.planningHorizonDays < 1) {
+    issues.push(`Settings planningHorizonDays is invalid (${db.settings.planningHorizonDays}).`);
+  }
+
   const seenSupplierIds = new Set<SupplierId>();
   for (const supplier of db.suppliers) {
     if (seenSupplierIds.has(supplier.id)) issues.push(`Duplicate supplier id "${supplier.id}".`);

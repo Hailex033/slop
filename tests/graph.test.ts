@@ -160,6 +160,23 @@ test('an unpriced-by-accident item is an integrity problem, not free food', () =
   assert.ok(issues.some((i) => i.includes('invalid packPrice of null')), JSON.stringify(issues));
 });
 
+test('mangled settings are integrity problems', () => {
+  const database = db([purchased('flour')]);
+  // 1e309 is valid JSON and Infinity in memory: plan add would sum it into
+  // a default serving count that serialises to null.
+  database.settings = {
+    ...database.settings,
+    household: [{ name: 'Bottomless', appetite: 1e309 }],
+    overheadPerHour: Number.NaN,
+    planningHorizonDays: 0,
+  };
+
+  const issues = validate(database);
+  assert.ok(issues.some((i) => i.includes('invalid appetite of Infinity')), JSON.stringify(issues));
+  assert.ok(issues.some((i) => i.includes('overheadPerHour is invalid')));
+  assert.ok(issues.some((i) => i.includes('planningHorizonDays is invalid')));
+});
+
 test('duplicate ids anywhere in the book are integrity problems', () => {
   const database = db(
     [purchased('flour'), made('loaf9')],

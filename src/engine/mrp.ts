@@ -457,7 +457,19 @@ export function runMrp(db: Database, options: MrpOptions = {}): MrpResult {
     if (!item.purchase) {
       problems.push(`"${item.name}" is short by ${net.toFixed(1)} ${item.stockUom} but has no supplier.`);
     }
-    for (const run of runs) {
+    // Perishable purchases re-batch anchored on the day the food actually
+    // arrives: bought Monday for Tuesday, the window is Monday plus the
+    // shelf life — Thursday's demand joins only if that reaches it, or it
+    // becomes its own trip (and, from a shop that cannot land it fresh, a
+    // conflict instead of silent under-coverage after the receipt).
+    const purchaseRuns =
+      item.shelfLifeDays === undefined
+        ? runs
+        : batchShortfalls(allocation.shortfalls, item.shelfLifeDays, (needOn) => {
+            const probe = schedulePurchase(db, item, needOn, asOf);
+            return probe.late ? needOn : addDays(probe.orderBy, item.purchase?.leadTimeDays ?? 0);
+          });
+    for (const run of purchaseRuns) {
       const trip = schedulePurchase(db, item, run.dueOn, asOf);
       if (trip.late) {
         const supplier = item.purchase ? findSupplier(db, item.purchase.supplierId) : undefined;
@@ -522,13 +534,20 @@ interface OrderRun {
 function batchShortfalls(
   shortfalls: readonly Shortfall[],
   shelfLifeDays: number | undefined,
+  anchorOf?: (dueOn: IsoDate) => IsoDate,
 ): OrderRun[] {
   const runs: OrderRun[] = [];
+  // The keeping window opens when the food *arrives*. For a purchased run
+  // that may be earlier than its first demand — a Monday-only shop buys
+  // Tuesday's salad on Monday — so callers can anchor each run on its
+  // scheduled receipt; without a callback the first demand date anchors.
+  let anchor: IsoDate | undefined;
   for (const short of shortfalls) {
     const current = runs[runs.length - 1];
     const stillGood =
       current !== undefined &&
-      (shelfLifeDays === undefined || daysBetween(current.dueOn, short.dueOn) <= shelfLifeDays);
+      (shelfLifeDays === undefined ||
+        (anchor !== undefined && daysBetween(anchor, short.dueOn) <= shelfLifeDays));
 
     if (current && stillGood) {
       current.qty += short.qty;
@@ -545,6 +564,7 @@ function batchShortfalls(
         sources: [...short.sources],
         ...(short.includeOptional === true ? { includeOptional: true } : {}),
       });
+      anchor = anchorOf ? anchorOf(short.dueOn) : short.dueOn;
     }
   }
   return runs;

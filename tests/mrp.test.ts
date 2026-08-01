@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
+import { weekdayIndex } from '../src/domain/date.js';
 import { issue, receive } from '../src/engine/inventory.js';
 import { commitProduction, runMrp } from '../src/engine/mrp.js';
 import { shoppingList } from '../src/engine/procurement.js';
@@ -140,6 +141,34 @@ test('a committed optional policy survives replanning a stocked child', () => {
   const orders = commitProduction(database, rerun);
   const relishOrder = orders.find((o) => o.itemId === 'relish')!;
   assert.equal(relishOrder.includeOptional, true);
+});
+
+test('a perishable merge anchors on the delivery day, not the first dinner', () => {
+  const database = db([
+    purchased('salad2', {
+      shelfLifeDays: 2,
+      purchase: { supplierId: 'mondays', packQty: 100, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+    }),
+  ]);
+  // Open Mondays only: Tuesday's salad is bought the day before.
+  database.suppliers.push({
+    id: 'mondays', name: 'Monday Market', leadTimeDays: 0,
+    deliveryDays: [weekdayIndex('2026-07-06')],
+  });
+  planned(database, 'salad2', 100, '2026-07-07');
+  planned(database, 'salad2', 100, '2026-07-09');
+
+  // Compared date-to-date, Tuesday and Thursday sit within the two-day
+  // shelf life and merged — but the food lands on Monday, and Monday plus
+  // two days is Wednesday. Thursday must be its own trip, and from a shop
+  // that cannot land it fresh, an honest conflict rather than a lot that
+  // quietly dies a day early.
+  const result = runMrp(database, { asOf: '2026-07-05', horizonDays: 7 });
+  const trips = result.purchases.filter((p) => p.itemId === 'salad2');
+  assert.equal(trips.length, 2, JSON.stringify(trips));
+  assert.ok(trips.some((p) => !p.late && close(p.qty, 100)), 'Tuesday shops on Monday');
+  assert.ok(trips.some((p) => p.late), "Thursday's salad is a conflict, not under-coverage");
+  assert.ok(result.conflicts.some((c) => c.includes('salad2')), JSON.stringify(result.conflicts));
 });
 
 test('overdue multi-day supply lands when the batch can finish, not when it starts', () => {
