@@ -527,8 +527,16 @@ export function rollupAllergens(db: Database, itemId: ItemId): AllergenHit[] {
 export function dietaryConflicts(
   db: Database,
   itemId: ItemId,
+  options: RollupOptions = {},
 ): { member: string; allergens: string[] }[] {
-  const present = new Set(rollupAllergens(db, itemId).filter((h) => !h.onlyOptional).map((h) => h.allergen));
+  // With the optional components on the plate, their allergens are on the
+  // plate too. The default view warns about the dish as made plain; the
+  // includeOptional view must warn about the dish actually being analysed.
+  const present = new Set(
+    rollupAllergens(db, itemId)
+      .filter((hit) => options.includeOptional === true || !hit.onlyOptional)
+      .map((hit) => hit.allergen),
+  );
   return db.settings.household
     .map((member) => ({
       member: member.name,

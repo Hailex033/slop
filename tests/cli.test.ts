@@ -6,7 +6,8 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseArgs } from '../src/cli.js';
+import { numberFlag, parseArgs } from '../src/cli.js';
+import { MiseError } from '../src/domain/errors.js';
 
 test('a boolean flag before a positional does not eat it', () => {
   const args = parseArgs(['--optional', 'lasagne'], new Set(['optional']));
@@ -43,4 +44,13 @@ test('a negative-looking value is consumed, not dropped', () => {
   // quietly fall back to a default quantity.
   const args = parseArgs(['-q', '-5'], new Set());
   assert.equal(args.flags['qty'], '-5');
+});
+
+test('a supplied numeric flag must actually be a number', () => {
+  // Absent falls back; supplied-but-broken must not quietly plan (and
+  // commit) with a different value than the one asked for.
+  assert.equal(numberFlag({ positionals: [], flags: {} }, 'horizon', 7), 7);
+  assert.equal(numberFlag({ positionals: [], flags: { horizon: '14' } }, 'horizon', 7), 14);
+  assert.throws(() => numberFlag({ positionals: [], flags: { horizon: 'nope' } }, 'horizon', 7), MiseError);
+  assert.throws(() => numberFlag({ positionals: [], flags: { horizon: true } }, 'horizon', 7), MiseError);
 });

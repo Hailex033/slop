@@ -2,6 +2,7 @@
 
 import { NotFoundError, ValidationError } from './errors.js';
 import { canConvert, dimensionOf, isUomCode, type ConversionContext, type UomCode } from './units.js';
+import { isIsoDate } from './date.js';
 import { MEAL_SLOTS } from './types.js';
 import type {
   Database,
@@ -325,9 +326,18 @@ export function validate(db: Database): string[] {
     }
   }
 
+  // Dates are compared as strings throughout the engine, so a value that is
+  // not a real ISO date — "tomorrow", "2026-02-30" — sorts and schedules as
+  // nonsense while formatting may show a different calendar day entirely.
   for (const lot of db.lots) {
     if (!findItem(db, lot.itemId)) issues.push(`Lot "${lot.id}" references unknown item "${lot.itemId}".`);
     if (lot.qty < 0) issues.push(`Lot "${lot.id}" has a negative quantity.`);
+    if (!isIsoDate(lot.receivedOn)) {
+      issues.push(`Lot "${lot.id}" has an invalid receivedOn date "${lot.receivedOn}".`);
+    }
+    if (lot.expiresOn !== undefined && !isIsoDate(lot.expiresOn)) {
+      issues.push(`Lot "${lot.id}" has an invalid expiresOn date "${lot.expiresOn}".`);
+    }
   }
   for (const entry of db.mealPlan) {
     if (!findItem(db, entry.itemId)) {
@@ -336,6 +346,9 @@ export function validate(db: Database): string[] {
     if (entry.servings <= 0) issues.push(`Meal plan entry "${entry.id}" has non-positive servings.`);
     if (!MEAL_SLOTS.includes(entry.slot)) {
       issues.push(`Meal plan entry "${entry.id}" has unknown slot "${entry.slot}".`);
+    }
+    if (!isIsoDate(entry.date)) {
+      issues.push(`Meal plan entry "${entry.id}" has an invalid date "${entry.date}".`);
     }
   }
 

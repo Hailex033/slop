@@ -137,11 +137,17 @@ export function parseArgs(argv: readonly string[], booleans: ReadonlySet<string>
   return { positionals, flags };
 }
 
-function numberFlag(args: Args, name: string, fallback: number): number {
+export function numberFlag(args: Args, name: string, fallback: number): number {
   const raw = args.flags[name];
-  if (raw === undefined || raw === true) return fallback;
+  if (raw === undefined) return fallback;
+  // Supplied is supplied: a bare `--horizon` or `--horizon nope` must not
+  // quietly plan — and commit — a different horizon than the one asked for.
+  if (raw === true) throw new MiseError(`--${name} needs a number.`);
   const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  if (!Number.isFinite(parsed)) {
+    throw new MiseError(`--${name} must be a number, not "${raw}".`);
+  }
+  return parsed;
 }
 
 function stringFlag(args: Args, name: string): string | undefined {
@@ -444,7 +450,9 @@ const commands: Record<string, Command> = {
             .join(', ')}`,
         );
       }
-      const conflicts = dietaryConflicts(ctx.db, target.itemId);
+      const conflicts = dietaryConflicts(ctx.db, target.itemId, {
+        includeOptional: boolFlag(ctx.args, 'optional'),
+      });
       for (const conflict of conflicts) {
         out(f.style(`  ! ${conflict.member} avoids ${conflict.allergens.join(', ')}`, 'red'));
       }

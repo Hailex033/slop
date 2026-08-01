@@ -118,6 +118,18 @@ test('duplicate suppliers and impossible slots are integrity problems', () => {
   assert.ok(issues.some((issue) => issue.includes('unknown slot "supper"')));
 });
 
+test('dates that are not dates are integrity problems too', () => {
+  const database = db([purchased('flour')]);
+  database.mealPlan.push({
+    id: 'MP-1', date: 'tomorrow' as never, slot: 'dinner', itemId: 'flour', servings: 2,
+  });
+  database.lots.push({ id: 'LOT-1', itemId: 'flour', qty: 100, receivedOn: '2026-02-30' as never });
+
+  const issues = validate(database);
+  assert.ok(issues.some((issue) => issue.includes('invalid date "tomorrow"')), JSON.stringify(issues));
+  assert.ok(issues.some((issue) => issue.includes('invalid receivedOn date "2026-02-30"')));
+});
+
 test('two recipes for one item is an integrity problem, not a quiet last-wins', () => {
   const database = db(
     [purchased('flour'), made('bread')],

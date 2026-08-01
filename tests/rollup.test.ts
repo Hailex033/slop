@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { seedDatabase } from '../src/data/seed.js';
-import { costOf, nutritionOf, purchaseUnitCost, rollupAllergens, rollupTime, rollupUnitCost } from '../src/engine/rollup.js';
+import { costOf, dietaryConflicts, nutritionOf, purchaseUnitCost, rollupAllergens, rollupTime, rollupUnitCost } from '../src/engine/rollup.js';
 import { MiseError } from '../src/domain/errors.js';
 import { close, db, made, nestedDb, phantom, purchased, recipe } from './helpers.js';
 
@@ -315,6 +315,33 @@ test('the example lasagne costs a plausible amount per serving', () => {
   assert.equal(report.complete, true);
   assert.equal(report.servings, 6);
   assert.ok(report.perServing > 1 && report.perServing < 10, `got ${report.perServing}`);
+});
+
+test('optional allergens warn when the optional view is on', () => {
+  const database = db(
+    [
+      purchased('pasta'),
+      purchased('walnuts', { allergens: ['nuts'] }),
+      made('salad'),
+    ],
+    [
+      recipe('salad', 500, [
+        { itemId: 'pasta', qty: 400, uom: 'g' },
+        { itemId: 'walnuts', qty: 50, uom: 'g', optional: true },
+      ]),
+    ],
+  );
+  database.settings = {
+    ...database.settings,
+    household: [{ name: 'Cleo', appetite: 1, avoids: ['nuts'] }],
+  };
+
+  // Plain dish, plain answer: the walnuts stay in the packet.
+  assert.deepEqual(dietaryConflicts(database, 'salad'), []);
+  // But the dish being analysed with them included must warn about them.
+  const withOptional = dietaryConflicts(database, 'salad', { includeOptional: true });
+  assert.equal(withOptional.length, 1);
+  assert.deepEqual(withOptional[0]!.allergens, ['nuts']);
 });
 
 test('passive overhead is charged once, not once per batch', () => {
