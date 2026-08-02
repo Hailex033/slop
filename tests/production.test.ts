@@ -1,0 +1,1724 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { seedDatabase } from '../src/data/seed.js';
+import { availableOn, onHand, onOrder, receive } from '../src/engine/inventory.js';
+import { commitProduction, runMrp } from '../src/engine/mrp.js';
+import { bySupplier, packsFor, raisePurchaseOrders, receivePurchaseOrder, shoppingList } from '../src/engine/procurement.js';
+import { cookableNow, executeOrder, feasibility, prepSchedule, produce, raiseProductionOrder, serve } from '../src/engine/production.js';
+import { CycleError, MiseError, ShortageError } from '../src/domain/errors.js';
+import { close, db, made, nestedDb, phantom, purchased, recipe } from './helpers.js';
+
+// ---------------------------------------------------------------------------
+// Procurement
+// ---------------------------------------------------------------------------
+
+test('requirements round up to whole packs', () => {
+  const database = db([
+    purchased('butter', {
+      purchase: { supplierId: 'shop', packQty: 250, packUom: 'g', packPrice: 2, leadTimeDays: 0 },
+    }),
+  ]);
+
+  assert.equal(packsFor(database, 'butter', 300).packs, 2);
+  assert.equal(packsFor(database, 'butter', 500).packs, 2, 'exactly two packs is two packs');
+  assert.equal(packsFor(database, 'butter', 501).packs, 3);
+  assert.equal(packsFor(database, 'butter', 1).packs, 1);
+});
+
+test('minimum order quantity overrides a smaller requirement', () => {
+  const database = db([
+    purchased('wine', {
+      purchase: { supplierId: 'shop', packQty: 750, packUom: 'ml', packPrice: 7, leadTimeDays: 0, moqPacks: 6 },
+      stockUom: 'ml',
+    }),
+  ]);
+  assert.equal(packsFor(database, 'wine', 100).packs, 6);
+});
+
+test('the shopping list reports the leftover that rounding creates', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 4 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const list = shoppingList(database, mrp);
+  const butter = list.lines.find((line) => line.itemId === 'butter')!;
+
+  // Needs 200 g, buys 2 × 100 g packs, no spare.
+  assert.equal(butter.packs, 2);
+  assert.ok(close(butter.leftover, 0));
+
+  const cheese = list.lines.find((line) => line.itemId === 'cheese')!;
+  assert.equal(cheese.packs, 2, '200 g needed from 100 g packs');
+  assert.ok(list.total > 0);
+});
+
+test('the shopping list says what each line is for', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 4 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const list = shoppingList(database, mrp);
+
+  assert.deepEqual(list.lines.find((line) => line.itemId === 'butter')!.forDishes, ['dish']);
+});
+
+test('a purchase order is stamped for the day the shop is actually open', () => {
+  const database = nestedDb();
+  database.suppliers = [{ id: 'shop', name: 'Saturday market', leadTimeDays: 0, deliveryDays: [6] }];
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-12', slot: 'dinner', itemId: 'cheese', servings: 200 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
+  const [order] = raisePurchaseOrders(database, shoppingList(database, mrp), '2026-07-06');
+
+  // The Sunday meal is shopped on Saturday the 11th — the market's day.
+  assert.ok(order);
+  assert.equal(order.expectedOn, '2026-07-11');
+
+  // The committed inbound covers the meal on the next run.
+  const after = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
+  assert.ok(close(after.lines.find((line) => line.itemId === 'cheese')!.onOrder, 200));
+  assert.deepEqual(after.conflicts, []);
+});
+
+test('a late line is a conflict to resolve, not an order to repeat', () => {
+  const database = nestedDb();
+  database.suppliers = [{ id: 'shop', name: 'Saturday market', leadTimeDays: 0, deliveryDays: [6] }];
+  // Thursday the 9th, with no Saturday before it: the market cannot serve it.
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-09', slot: 'dinner', itemId: 'cheese', servings: 200 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-06', horizonDays: 14 }));
+  assert.equal(list.lines[0]!.late, true);
+
+  // Committing a delivery that misses its meal buys food twice: the order
+  // cannot serve the demand, so the next run re-plans the same shortfall —
+  // and would commit it again, and again.
+  assert.deepEqual(raisePurchaseOrders(database, list, '2026-07-06'), []);
+  const rerun = runMrp(database, { asOf: '2026-07-06', horizonDays: 14 });
+  assert.equal(rerun.conflicts.length, 1, 'the decision stays on the table');
+  assert.deepEqual(
+    raisePurchaseOrders(database, shoppingList(database, rerun), '2026-07-06'),
+    [],
+    'no amount of committing creates a second order',
+  );
+});
+
+test('a stale shopping list cannot be committed after its trip has passed', () => {
+  const database = db([
+    purchased('cheese', {
+      purchase: { supplierId: 'shop', packQty: 100, packUom: 'g', packPrice: 2, leadTimeDays: 5 },
+    }),
+  ]);
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-12', slot: 'dinner', itemId: 'cheese', servings: 200 });
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 14 }));
+
+  // Planned on the 1st, the five-day lead time makes the 7th the last day
+  // to order. Committing the same list on the 9th would slide orderedOn
+  // forward and book an arrival after the meal — firm supply the next run
+  // could never allocate, alongside the replacement it must plan anyway.
+  assert.throws(() => raisePurchaseOrders(database, list, '2026-07-09'), /stale/);
+  assert.equal(database.purchaseOrders.length, 0, 'nothing was half-committed');
+
+  // A fresh plan reports the same situation honestly: a late line and a
+  // conflict to decide on, not an order that cannot arrive in time.
+  const rerun = runMrp(database, { asOf: '2026-07-09', horizonDays: 14 });
+  assert.deepEqual(raisePurchaseOrders(database, shoppingList(database, rerun), '2026-07-09'), []);
+  assert.equal(rerun.conflicts.length, 1, 'the decision stays on the table');
+});
+
+test('a pack-size edit after ordering does not change what was ordered', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'cheese', servings: 200 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const [order] = raisePurchaseOrders(database, shoppingList(database, mrp), '2026-07-01');
+  assert.ok(order);
+  assert.equal(order.lines[0]!.packs, 2, 'two 100 g packs cover 200 g');
+
+  // The shop rebrands: cheese now comes in 250 g packs at a new price. The
+  // order in flight was for two 100 g packs and must stay two 100 g packs.
+  database.items = database.items.map((item) =>
+    item.id === 'cheese'
+      ? { ...item, purchase: { ...item.purchase!, packQty: 250, packPrice: 2.4 } }
+      : item,
+  );
+
+  // Planning still counts the inbound at the ordered size, on both paths...
+  const after = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(close(after.lines.find((line) => line.itemId === 'cheese')!.onOrder, 200));
+  assert.ok(close(onOrder(database, 'cheese', '2026-07-07'), 200));
+
+  // ...and the receipt books in what was committed to, not the new pack.
+  const receipt = receivePurchaseOrder(database, order.id, '2026-07-02');
+  assert.equal(receipt.lots.length, 1);
+  assert.ok(close(receipt.lots[0]!.qty, 200), `got ${receipt.lots[0]!.qty}`);
+});
+
+test('a receipt that fails mid-order books nothing at all', () => {
+  const database = nestedDb();
+  database.purchaseOrders.push({
+    id: 'PO-0001',
+    supplierId: 'shop',
+    orderedOn: '2026-07-01',
+    expectedOn: '2026-07-01',
+    status: 'open',
+    lines: [
+      // The butter line is fine; the ghost line throws after it has booked.
+      { itemId: 'butter', packs: 2, packQty: 100, packUom: 'g', unitPrice: 1 },
+      { itemId: 'ghost', packs: 1, packQty: 100, packUom: 'g', unitPrice: 1 },
+    ],
+  });
+  const ledgerBefore = database.ledger.length;
+
+  assert.throws(() => receivePurchaseOrder(database, 'PO-0001', '2026-07-01'));
+
+  assert.equal(onHand(database, 'butter'), 0, 'the butter lot was rolled back with the failure');
+  assert.equal(database.ledger.length, ledgerBefore, 'the ledger records nothing that did not happen');
+  const order = database.purchaseOrders.find((o) => o.id === 'PO-0001')!;
+  assert.equal(order.status, 'open', 'so the order can be corrected and received exactly once');
+});
+
+test('an unresolved line is never committed into an order', () => {
+  const database = nestedDb();
+  database.items.push({
+    id: 'mystery', name: 'mystery', category: 'Test', sourcing: 'purchased', stockUom: 'g',
+    // Supplier and pack on file, price hand-mangled: reported, not ordered.
+    purchase: { supplierId: 'shop', packQty: 100, packUom: 'g', packPrice: Number.NaN, leadTimeDays: 0 },
+  });
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'mystery', servings: 100 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  assert.equal(list.unresolved.length, 1, 'the missing price is reported');
+
+  const orders = raisePurchaseOrders(database, list, '2026-07-01');
+  assert.ok(
+    orders.every((order) => order.lines.every((line) => line.itemId !== 'mystery')),
+    'a question is not an order',
+  );
+});
+
+test('serving a planned meal retires its demand', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 500, on: '2026-06-30' });
+
+  const result = serve(database, 'dish', 4, { on: '2026-07-02' });
+  assert.equal(result.servedPlanEntryId, 'MP-1');
+
+  // The food is eaten; re-planning must not buy and cook a replacement.
+  const rerun = runMrp(database, { asOf: '2026-07-02', horizonDays: 7 });
+  assert.ok(!rerun.production.some((order) => order.itemId === 'dish'), 'not planned again');
+
+  // An entry for a future date is untouched by today's serving.
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-05', slot: 'dinner', itemId: 'dish', servings: 4 });
+  const later = serve(database, 'dish', 4, { on: '2026-07-03', allowShortages: true });
+  assert.equal(later.servedPlanEntryId, undefined, 'nothing due on or before the 3rd matches');
+  assert.equal(database.mealPlan.find((e) => e.id === 'MP-2')!.servedOn, undefined);
+});
+
+test('a partial serving retires only the portions eaten', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 6 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+
+  serve(database, 'dish', 2, { on: '2026-07-02' });
+  const entry = database.mealPlan[0]!;
+  assert.equal(entry.servedServings, 2);
+  assert.equal(entry.servedOn, undefined, 'four portions are still owed');
+
+  // Planning still wants the remaining four — not zero, not six.
+  const rerun = runMrp(database, { asOf: '2026-07-02', horizonDays: 7 });
+  const run = rerun.production.find((o) => o.itemId === 'dish')!;
+  assert.ok(close(run.qty, 1500), `got ${run.qty}`);
+
+  serve(database, 'dish', 4, { on: '2026-07-03' });
+  assert.equal(entry.servedOn, '2026-07-03', 'now it is history');
+  assert.ok(!runMrp(database, { asOf: '2026-07-03', horizonDays: 7 }).production.some((o) => o.itemId === 'dish'));
+});
+
+test('a serving that spans several due entries retires them earliest-first', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-01', slot: 'lunch', itemId: 'dish', servings: 2 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 2 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+
+  // Yesterday's skipped lunch and tonight's dinner, eaten as one sitting.
+  // The overflow must reach the second entry — capped at the first, the
+  // extra portion would stay demand and be cooked again although eaten.
+  const result = serve(database, 'dish', 3, { on: '2026-07-02' });
+  assert.equal(result.servedPlanEntryId, 'MP-1', 'reported against the earliest entry');
+
+  const first = database.mealPlan.find((e) => e.id === 'MP-1')!;
+  const second = database.mealPlan.find((e) => e.id === 'MP-2')!;
+  assert.equal(first.servedOn, '2026-07-02', 'the earliest retired in full');
+  assert.equal(second.servedServings, 1, 'the spill lands on the next one');
+  assert.equal(second.servedOn, undefined, 'which still owes a portion');
+
+  // Planning wants exactly the one outstanding portion — not three, not zero.
+  const rerun = runMrp(database, { asOf: '2026-07-02', horizonDays: 7 });
+  const run = rerun.production.find((o) => o.itemId === 'dish')!;
+  assert.ok(close(run.qty, 375), `got ${run.qty}`);
+});
+
+test('an explicit plan entry keeps a big serving to itself', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-01', slot: 'lunch', itemId: 'dish', servings: 2 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 2 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+
+  // Four portions against a named two-portion entry: the extra two are
+  // seconds, not a licence to quietly retire the other meal's demand.
+  serve(database, 'dish', 4, { on: '2026-07-02', planEntryId: 'MP-2' });
+
+  assert.equal(database.mealPlan.find((e) => e.id === 'MP-2')!.servedOn, '2026-07-02');
+  const other = database.mealPlan.find((e) => e.id === 'MP-1')!;
+  assert.equal(other.servedServings, undefined, 'the unnamed entry is untouched');
+  assert.equal(other.servedOn, undefined);
+});
+
+test('a legacy fully-served entry stays history without a quantity', () => {
+  const database = nestedDb();
+  // Data written before servedServings existed: the completion marker alone.
+  database.mealPlan.push({
+    id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 4, servedOn: '2026-07-02',
+  });
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(!result.production.some((o) => o.itemId === 'dish'), 'servedOn alone means fully served');
+
+  // And a serve today must not re-open it either.
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 500, on: '2026-06-30' });
+  const served = serve(database, 'dish', 4, { on: '2026-07-03' });
+  assert.equal(served.servedPlanEntryId, undefined, 'history is not a match');
+});
+
+test('purchase commits refuse an invalid plan too', () => {
+  const database = db(
+    [purchased('flour'), made('bread')],
+    [
+      recipe('bread', 1000, [
+        { itemId: 'flour', qty: 600, uom: 'g' },
+        { itemId: 'ghost', qty: 100, uom: 'g' },
+      ]),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'bread', servings: 1 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const list = shoppingList(database, mrp);
+  assert.ok(list.problems.length > 0, 'the list carries the run\'s problems');
+
+  // Paying for the surviving ingredients of a dish that cannot be cooked
+  // just moves the damage into the order book.
+  assert.throws(() => raisePurchaseOrders(database, list, '2026-07-01'), /Cannot commit/);
+  assert.equal(database.purchaseOrders.length, 0);
+});
+
+test('an explicit plan entry must match the dish being served', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'cheese', servings: 100 });
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 500, on: '2026-06-30' });
+
+  const ledgerBefore = database.ledger.length;
+  assert.throws(
+    () => serve(database, 'dish', 4, { on: '2026-07-02', planEntryId: 'MP-1' }),
+    /not an unserved entry for/,
+  );
+  assert.equal(database.ledger.length, ledgerBefore, 'refused before anything moved');
+  assert.equal(database.mealPlan[0]!.servedServings, undefined, 'the cheese entry is untouched');
+});
+
+test('a committed plan keeps its optional policy', () => {
+  const database = db(
+    [purchased('base'), purchased('garnish'), made('plate')],
+    [
+      recipe('plate', 1000, [
+        { itemId: 'base', qty: 800, uom: 'g' },
+        { itemId: 'garnish', qty: 50, uom: 'g', optional: true },
+      ]),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'plate', servings: 1 });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7, includeOptional: true }));
+  const order = database.productionOrders[0]!;
+  assert.equal(order.includeOptional, true);
+
+  // A later default run still buys the garnish the commitment includes…
+  const rerun = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(rerun.purchases.some((line) => line.itemId === 'garnish'), 'the committed garnish is still bought');
+
+  // …and executing the order issues it.
+  receive(database, 'base', { qty: 1000, on: '2026-07-01' });
+  receive(database, 'garnish', { qty: 100, on: '2026-07-01' });
+  const result = executeOrder(database, order.id, { on: '2026-07-03' });
+  assert.ok(result.consumed.some((line) => line.itemId === 'garnish'), 'cooked as committed');
+});
+
+test('a forced serve of a purchased item records the gap instead of refusing', () => {
+  const database = db([purchased('bread', { shelfLifeDays: 4 })]);
+  receive(database, 'bread', { qty: 100, on: '2026-07-01' });
+
+  // Without --force the honest refusal stands: there is no recipe to run.
+  assert.throws(() => serve(database, 'bread', 250, { on: '2026-07-02' }), /can only be bought/);
+
+  const result = serve(database, 'bread', 250, { on: '2026-07-02', allowShortages: true });
+  assert.ok(result.shortages.some((s) => s.itemId === 'bread' && close(s.short, 150)));
+
+  // The ledger accounts for the whole serving, overrun included.
+  const consumed = database.ledger
+    .filter((txn) => txn.type === 'issue')
+    .reduce((sum, txn) => sum + txn.qty, 0);
+  assert.ok(close(consumed, -250), `ledger accounts for ${consumed}`);
+});
+
+test('a recipe hole makes a dish infeasible, not unlimited', () => {
+  const database = nestedDb();
+  database.items = database.items.filter((item) => item.id !== 'cheese');
+  receive(database, 'butter', { qty: 5000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 5000, on: '2026-06-30' });
+
+  const check = feasibility(database, 'dish', 4, '2026-07-01', true);
+  assert.ok(check.servings < 0.01, `got ${check.servings}`);
+  assert.ok(
+    check.missing.some((m) => m.itemId === 'cheese' && m.name.includes('not in the item master')),
+    JSON.stringify(check.missing),
+  );
+});
+
+test('a dangling supplier reference is unresolved, not quietly ordered from', () => {
+  const database = nestedDb();
+  database.items.push({
+    id: 'import', name: 'import', category: 'Test', sourcing: 'purchased', stockUom: 'g',
+    // The supplier this points at was deleted in a hand edit.
+    purchase: { supplierId: 'gone', packQty: 100, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+  });
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'import', servings: 100 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const line = list.lines.find((l) => l.itemId === 'import')!;
+
+  assert.match(line.problem ?? '', /unknown supplier "gone"/);
+  assert.equal(list.unresolved.length, 1);
+  // And no purchase order is raised against a supplier that does not exist.
+  const orders = raisePurchaseOrders(database, list, '2026-07-01');
+  assert.ok(orders.every((order) => order.supplierId !== 'gone'));
+});
+
+test('a free item is priced at zero, not flagged as unpriced', () => {
+  const database = nestedDb();
+  // The seeded sourdough starter's shape: a standing item replenished for
+  // nothing, with a genuine £0 pack price.
+  database.items.push({
+    id: 'starter', name: 'starter', category: 'Test', sourcing: 'purchased', stockUom: 'g',
+    purchase: { supplierId: 'shop', packQty: 100, packUom: 'g', packPrice: 0, leadTimeDays: 0 },
+  });
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'starter', servings: 100 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const line = list.lines.find((l) => l.itemId === 'starter')!;
+
+  assert.equal(line.problem, undefined, 'free is a price, not a missing one');
+  assert.equal(line.lineCost, 0);
+  assert.deepEqual(list.unresolved, []);
+});
+
+test('two visits to the same supplier are two trips on the shopping list', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'cheese' ? { ...item, shelfLifeDays: 2 } : item,
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-02', slot: 'dinner', itemId: 'cheese', servings: 200 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-08', slot: 'dinner', itemId: 'cheese', servings: 200 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 10 }));
+  const groups = bySupplier(list);
+
+  // Six days apart on a two-day shelf life cannot be one undated visit.
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups.map((g) => g.orderBy), ['2026-07-02', '2026-07-08']);
+  assert.ok(groups.every((g) => g.supplier === 'Shop'));
+});
+
+test('production orders exist only for things that can be made', () => {
+  const database = db(
+    [purchased('flour'), phantom('mix2')],
+    [recipe('mix2', 100, [{ itemId: 'flour', qty: 100, uom: 'g' }])],
+  );
+
+  // MRP would credit either as inbound supply while execution can never
+  // complete them: nothing to cook, or nothing that can enter stock.
+  assert.throws(() => raiseProductionOrder(database, 'flour', 100, '2026-07-03'), /purchased/);
+  assert.throws(() => raiseProductionOrder(database, 'mix2', 100, '2026-07-03'), /phantom/);
+
+  // And never for nothing: executeOrder could not cook it, and doctor
+  // would immediately call the book invalid.
+  database.items.push(made('loaf3'));
+  database.recipes.push(recipe('loaf3', 1000, [{ itemId: 'flour', qty: 600, uom: 'g' }]));
+  assert.throws(() => raiseProductionOrder(database, 'loaf3', 0, '2026-07-03'), /Cannot raise/);
+  assert.throws(() => raiseProductionOrder(database, 'loaf3', Number.NaN, '2026-07-03'), /Cannot raise/);
+  assert.equal(database.productionOrders.length, 0);
+});
+
+test('an empty purchase order cannot be received shut', () => {
+  const database = db([purchased('flour')]);
+  database.purchaseOrders.push({
+    id: 'PO-1', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
+    lines: [],
+  });
+
+  // Closing it would retire the commitment with no lot and no ledger
+  // evidence — a malformed order silently becoming history.
+  assert.throws(() => receivePurchaseOrder(database, 'PO-1', '2026-07-02'), /no lines/);
+  assert.equal(database.purchaseOrders[0]!.status, 'open');
+});
+
+test('a zero-quantity order line blocks the receipt instead of vanishing', () => {
+  const database = db([purchased('flour')]);
+  database.purchaseOrders.push({
+    id: 'PO-1', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
+    lines: [{ itemId: 'flour', packs: 0, unitPrice: 1, packQty: 100, packUom: 'g' }],
+  });
+
+  // Skipping the line and marking the order received would erase the
+  // inbound commitment without a lot, a ledger entry, or an error.
+  assert.throws(() => receivePurchaseOrder(database, 'PO-1', '2026-07-02'), /nothing receivable/);
+  assert.equal(database.purchaseOrders[0]!.status, 'open', 'the commitment still stands');
+  assert.equal(database.lots.length, 0, 'and nothing was booked');
+});
+
+test('feasibility counts optional components only when asked', () => {
+  const database = db(
+    [purchased('polenta'), purchased('shavings'), made('board')],
+    [
+      recipe('board', 1000, [
+        { itemId: 'polenta', qty: 1000, uom: 'g' },
+        { itemId: 'shavings', qty: 50, uom: 'g', optional: true },
+      ]),
+    ],
+  );
+  receive(database, 'polenta', { qty: 1000, on: '2026-07-01' });
+
+  // Plain: fully coverable. With the flag — the same one the dry run and
+  // the cook now share — the missing garnish is reported, so `cook --dry
+  // --optional` predicts exactly what `cook --optional` will attempt.
+  assert.equal(feasibility(database, 'board', 1, '2026-07-02', true).missing.length, 0);
+  const withOptional = feasibility(database, 'board', 1, '2026-07-02', true, true);
+  assert.ok(
+    withOptional.missing.some((m) => m.itemId === 'shavings'),
+    JSON.stringify(withOptional.missing),
+  );
+});
+
+test('two suppliers sharing a name are still two trips', () => {
+  const database = db(
+    [
+      purchased('ribeye', {
+        purchase: { supplierId: 'butcher-a', packQty: 500, packUom: 'g', packPrice: 12, leadTimeDays: 0 },
+      }),
+      purchased('sausage', {
+        purchase: { supplierId: 'butcher-b', packQty: 500, packUom: 'g', packPrice: 6, leadTimeDays: 0 },
+      }),
+      made('grill'),
+    ],
+    [
+      recipe('grill', 1000, [
+        { itemId: 'ribeye', qty: 500, uom: 'g' },
+        { itemId: 'sausage', qty: 500, uom: 'g' },
+      ]),
+    ],
+  );
+  database.suppliers.push(
+    { id: 'butcher-a', name: 'The Butcher', leadTimeDays: 0 },
+    { id: 'butcher-b', name: 'The Butcher', leadTimeDays: 0 },
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'grill', servings: 1 });
+
+  const list = shoppingList(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const trips = bySupplier(list);
+
+  // One trading name, two shops: the heading can repeat, the visits cannot
+  // merge — the same split raisePurchaseOrders makes in the order book.
+  assert.equal(trips.length, 2, JSON.stringify(trips.map((t) => t.supplier)));
+  assert.deepEqual(trips.map((t) => t.supplierId).sort(), ['butcher-a', 'butcher-b']);
+  assert.ok(trips.every((t) => t.supplier === 'The Butcher'));
+  assert.equal(raisePurchaseOrders(database, list, '2026-07-01').length, 2, 'matching the order book');
+});
+
+test('one purchase order per trip, not per supplier', () => {
+  const database = nestedDb();
+  database.suppliers = [{ id: 'shop', name: 'Shop', leadTimeDays: 0 }];
+  database.mealPlan.push(
+    { id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'cheese', servings: 200 },
+    { id: 'MP-2', date: '2026-07-20', slot: 'dinner', itemId: 'butter', servings: 200 },
+  );
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 30 });
+  const orders = raisePurchaseOrders(database, shoppingList(database, mrp), '2026-07-01');
+
+  assert.equal(orders.length, 2, 'two different shopping days are two orders');
+  assert.deepEqual(orders.map((order) => order.expectedOn).sort(), ['2026-07-03', '2026-07-20']);
+});
+
+// ---------------------------------------------------------------------------
+// Feasibility
+// ---------------------------------------------------------------------------
+
+test('feasibility pools a leaf used twice before comparing against stock', () => {
+  const database = nestedDb();
+  // Four servings need 200 g of butter in total: 100 g via sauce > roux, and
+  // 100 g directly in the crust. Stock exactly that, and nothing else spare.
+  receive(database, 'butter', { qty: 200 });
+  receive(database, 'flour', { qty: 1000 });
+  receive(database, 'cheese', { qty: 1000 });
+
+  assert.ok(close(feasibility(database, 'dish', 4).servings, 4, 1e-6));
+
+  // Butter alone is the binding constraint, and it binds on the *pooled*
+  // requirement — not on either branch taken separately.
+  database.lots = [];
+  receive(database, 'butter', { qty: 100 });
+  receive(database, 'flour', { qty: 10_000 });
+  receive(database, 'cheese', { qty: 10_000 });
+  const check = feasibility(database, 'dish', 4);
+  assert.ok(close(check.servings, 2, 1e-6), `100 g of butter is two servings, got ${check.servings}`);
+});
+
+test('a sub-recipe already in the fridge counts as itself, not its ingredients', () => {
+  const database = nestedDb();
+  // Everything the dish needs, but only as finished sub-recipes: no butter or
+  // flour in the house at all. `produce` would issue these happily, so
+  // feasibility must not insist on the raw ingredients behind them.
+  receive(database, 'sauce', { qty: 1000 });
+  receive(database, 'crust', { qty: 300 });
+  receive(database, 'cheese', { qty: 200 });
+
+  const check = feasibility(database, 'dish', 4);
+
+  assert.deepEqual(check.missing, []);
+  assert.ok(close(check.servings, 4, 1e-3), `got ${check.servings}`);
+});
+
+test('partial sub-recipe stock falls back to making up the difference', () => {
+  const database = nestedDb();
+  receive(database, 'sauce', { qty: 500 }); // half of what four servings need
+  receive(database, 'cheese', { qty: 200 });
+  receive(database, 'butter', { qty: 150 }); // 50 g for the missing sauce, 100 g for the crust
+  receive(database, 'flour', { qty: 250 }); // 50 g via the roux, 200 g in the crust
+
+  const check = feasibility(database, 'dish', 4);
+
+  assert.deepEqual(check.missing, [], 'the shortfall is coverable from raw ingredients');
+  assert.ok(close(check.servings, 4, 1e-3), `got ${check.servings}`);
+});
+
+test('feasibility names what is missing and by how much', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 100 });
+  receive(database, 'flour', { qty: 100 });
+
+  const check = feasibility(database, 'dish', 4);
+  const missing = new Map(check.missing.map((entry) => [entry.itemId, entry.short]));
+
+  assert.ok(missing.has('cheese'));
+  assert.ok(close(missing.get('cheese')!, 200));
+  assert.ok(missing.has('flour'));
+  assert.ok(close(missing.get('flour')!, 200), '300 g needed, 100 g in the house');
+});
+
+test('an empty pantry can cook nothing', () => {
+  assert.deepEqual(cookableNow(nestedDb()), []);
+});
+
+// ---------------------------------------------------------------------------
+// Execution
+// ---------------------------------------------------------------------------
+
+test('cooking issues the components and books in the output', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+
+  const result = produce(database, 'crust', 300, { on: '2026-07-01' });
+
+  assert.equal(onHand(database, 'butter'), 900);
+  assert.equal(onHand(database, 'flour'), 800);
+  assert.equal(onHand(database, 'crust'), 300);
+  assert.ok(close(result.cost, 3), `100 g + 200 g at £0.01, got ${result.cost}`);
+  assert.ok(result.lotId);
+});
+
+test('a missing sub-recipe is cooked on the spot, recursively', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+
+  // Sauce needs roux, which is a phantom made of butter and flour. Nothing
+  // but raw ingredients is in the house.
+  const result = produce(database, 'sauce', 1000, { on: '2026-07-01' });
+
+  assert.equal(onHand(database, 'sauce'), 1000);
+  assert.equal(onHand(database, 'butter'), 900, 'the roux ate 100 g of butter');
+  assert.equal(onHand(database, 'flour'), 900);
+  assert.equal(onHand(database, 'roux'), 0, 'a phantom is never left in stock');
+  assert.ok(close(result.cost, 2), `got ${result.cost}`);
+});
+
+test('a stocked sub-recipe short by some amount is topped up, not remade wholesale', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 1000, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'sauce', { qty: 600, unitCost: 0.002, on: '2026-06-30' });
+  receive(database, 'crust', { qty: 300, unitCost: 0.01, on: '2026-06-30' });
+
+  produce(database, 'dish', 1500, { on: '2026-07-01' });
+
+  // Needed 1000 g of sauce, had 600 g, so only 400 g was made: that is 80 g of
+  // roux, which is 40 g of butter and 40 g of flour.
+  assert.equal(onHand(database, 'sauce'), 0);
+  assert.ok(close(onHand(database, 'butter'), 960), `got ${onHand(database, 'butter')}`);
+  assert.ok(close(onHand(database, 'flour'), 960));
+  assert.equal(onHand(database, 'dish'), 1500);
+});
+
+test('actual cost comes from the lots consumed, not the price list', () => {
+  const database = nestedDb();
+  // Bought cheap in a sale; the standard cost is £0.01/g.
+  receive(database, 'butter', { qty: 1000, unitCost: 0.005, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 1000, unitCost: 0.005, on: '2026-06-30' });
+
+  const result = produce(database, 'crust', 300, { on: '2026-07-01' });
+  assert.ok(close(result.cost, 1.5), `got ${result.cost}`);
+
+  const lot = database.lots.find((entry) => entry.itemId === 'crust')!;
+  assert.ok(close(lot.unitCost ?? 0, 0.005));
+});
+
+test('shortages are reported rather than silently producing from nothing', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 10, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 10, on: '2026-06-30' });
+
+  const result = produce(database, 'crust', 300, { on: '2026-07-01', allowShortages: true });
+  const short = new Map(result.shortages.map((entry) => [entry.itemId, entry.short]));
+
+  assert.ok(close(short.get('butter') ?? 0, 90));
+  assert.ok(close(short.get('flour') ?? 0, 190));
+});
+
+// ---------------------------------------------------------------------------
+// Scheduling
+// ---------------------------------------------------------------------------
+
+test('prep tasks within a day run deepest-first', () => {
+  const database = seedDatabase({ from: '2026-07-01' });
+  database.mealPlan = [{ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'lasagne', servings: 6 }];
+  database.lots = [];
+
+  const days = prepSchedule(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const flat = days.flatMap((day) => day.tasks);
+  const positionOf = (id: string) => flat.findIndex((task) => task.itemId === id);
+
+  assert.ok(positionOf('ragu') < positionOf('lasagne'), 'the ragù before the lasagne');
+  assert.ok(positionOf('besciamella') < positionOf('lasagne'));
+  assert.ok(positionOf('pasta-sheets') < positionOf('lasagne'));
+});
+
+test('executing a parent order settles the child orders its cascade cooked', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 500, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const orderFor = (id: string) => database.productionOrders.find((o) => o.itemId === id)!;
+  assert.equal(orderFor('sauce').status, 'open');
+
+  // Cooking the dish cascades into the sauce and the crust — the same
+  // batches the committed child orders stand for.
+  executeOrder(database, orderFor('dish').id, { on: '2026-07-03' });
+
+  assert.equal(orderFor('sauce').status, 'received', 'the cascade executed it');
+  assert.equal(orderFor('crust').status, 'received');
+  assert.equal(orderFor('dish').status, 'received');
+  assert.throws(() => executeOrder(database, orderFor('sauce').id), /already done/);
+});
+
+test('a failed cook puts settled child orders back', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  // Butter and flour for the sub-recipes, but no cheese: the dish fails on
+  // its last component, after both cascades have already settled orders.
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const orderFor = (id: string) => database.productionOrders.find((o) => o.itemId === id)!;
+
+  assert.throws(() => executeOrder(database, orderFor('dish').id, { on: '2026-07-03' }), ShortageError);
+
+  assert.equal(orderFor('sauce').status, 'open', 'the settled order came back with the rollback');
+  assert.equal(orderFor('crust').status, 'open');
+  assert.equal(orderFor('dish').status, 'open');
+  assert.equal(onHand(database, 'butter'), 500, 'and so did the butter');
+});
+
+test('a merged child order is cooked whole on first use and banked for the rest', () => {
+  const database = nestedDb();
+  // A one-day shelf life keeps the two dishes as separate runs, while the
+  // sauce — which keeps — merges into a single committed order serving both.
+  database.items = database.items.map((item) =>
+    item.id === 'dish' ? { ...item, shelfLifeDays: 1 } : item,
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-06', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const dishOrders = database.productionOrders
+    .filter((o) => o.itemId === 'dish')
+    .sort((a, b) => a.dueOn.localeCompare(b.dueOn));
+  const sauceOrder = database.productionOrders.find((o) => o.itemId === 'sauce')!;
+  assert.equal(dishOrders.length, 2);
+  assert.ok(close(sauceOrder.qty, 2000), 'one merged commitment for both meals');
+
+  // The first dinner meets the merged commitment in full: the run is one
+  // making, so it is cooked once, and the second dinner's half goes on the
+  // shelf — which the run's own planning proved it keeps long enough for.
+  executeOrder(database, dishOrders[0]!.id, { on: '2026-07-03' });
+  assert.equal(sauceOrder.status, 'received', 'one committed making, made once');
+  assert.ok(close(onHand(database, 'sauce'), 1000), `got ${onHand(database, 'sauce')}`);
+
+  // The second dinner draws the banked half instead of cooking again.
+  const second = executeOrder(database, dishOrders[1]!.id, { on: '2026-07-06' });
+  assert.ok(close(onHand(database, 'sauce'), 0), 'drawn, not re-made');
+  const sauceLine = second.consumed.find((line) => line.itemId === 'sauce')!;
+  assert.equal(sauceLine.madeToOrder, false, 'the second dinner just opens the fridge');
+});
+
+test('a cascaded child batch keeps the policy it was committed with', () => {
+  const database = db(
+    [purchased('base'), purchased('garnish'), made('sauce'), made('dish')],
+    [
+      recipe('sauce', 1000, [
+        { itemId: 'base', qty: 1000, uom: 'g' },
+        { itemId: 'garnish', qty: 100, uom: 'g', optional: true },
+      ]),
+      recipe('dish', 1000, [{ itemId: 'sauce', qty: 500, uom: 'g' }]),
+    ],
+  );
+  receive(database, 'base', { qty: 5000, on: '2026-07-01' });
+  receive(database, 'garnish', { qty: 500, on: '2026-07-01' });
+  // The shared sauce batch was committed *with* its garnish (one of the
+  // dinners it feeds wants it); the executing dish order was committed
+  // plain. The batch belongs to its own commitment, not to whichever
+  // parent happens to execute first.
+  database.productionOrders.push({
+    id: 'PRD-SAUCE', itemId: 'sauce', qty: 1000, dueOn: '2026-07-03', startOn: '2026-07-03',
+    status: 'open', pegging: ['MP-1', 'MP-2'], includeOptional: true,
+  });
+  database.productionOrders.push({
+    id: 'PRD-DISH', itemId: 'dish', qty: 3000, dueOn: '2026-07-03', startOn: '2026-07-03',
+    status: 'open', pegging: ['MP-1'],
+  });
+
+  // The plain dish needs 1500 g of sauce. The committed 1000 g batch is
+  // swept and cooked with the garnish it was promised with; only the
+  // 500 g remainder is this parent's own plain making.
+  executeOrder(database, 'PRD-DISH', { on: '2026-07-03' });
+
+  assert.ok(close(onHand(database, 'garnish'), 400), `got ${onHand(database, 'garnish')}`);
+  assert.ok(close(onHand(database, 'base'), 3500), 'both makings drew their base');
+  assert.equal(database.productionOrders.find((o) => o.id === 'PRD-SAUCE')!.status, 'received');
+  assert.ok(close(onHand(database, 'sauce'), 0), 'made 1500, consumed 1500');
+});
+
+test('a merged run consumes its fixed inputs once, however many meals share it', () => {
+  const database = nestedDb();
+  // One sachet per making of sauce, however large the batch.
+  database.items.push(purchased('sachet', { stockUom: 'ea' }));
+  database.recipes = database.recipes.map((r) =>
+    r.outputItemId === 'sauce'
+      ? { ...r, components: [...r.components, { itemId: 'sachet', qty: 1, uom: 'ea', scalable: false }] }
+      : r,
+  );
+  database.items = database.items.map((item) =>
+    item.id === 'dish' ? { ...item, shelfLifeDays: 1 } : item,
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-06', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+  // Exactly what the plan calls for: one making's sachet, not two.
+  receive(database, 'sachet', { qty: 1, on: '2026-06-30' });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(!mrp.purchases.some((p) => p.itemId === 'sachet'), 'planning wants no second sachet');
+  commitProduction(database, mrp);
+  const dishOrders = database.productionOrders
+    .filter((o) => o.itemId === 'dish')
+    .sort((a, b) => a.dueOn.localeCompare(b.dueOn));
+
+  // Splitting the merged sauce run across the dinners would cook it twice —
+  // and the second making would fail short one sachet nobody planned to buy.
+  executeOrder(database, dishOrders[0]!.id, { on: '2026-07-03' });
+  const second = executeOrder(database, dishOrders[1]!.id, { on: '2026-07-06' });
+  assert.equal(second.shortages.length, 0, 'no unplanned shortage');
+  assert.ok(close(onHand(database, 'sachet'), 0), 'one making, one sachet');
+});
+
+test('an early execution does not bank perishable surplus past its keeping', () => {
+  const database = nestedDb();
+  database.items = database.items.map((item) =>
+    item.id === 'dish' ? { ...item, shelfLifeDays: 1 }
+    : item.id === 'sauce' ? { ...item, shelfLifeDays: 2 }
+    : item,
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-05', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 4000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 4000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 4000, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const dishOrders = database.productionOrders
+    .filter((o) => o.itemId === 'dish')
+    .sort((a, b) => a.dueOn.localeCompare(b.dueOn));
+  const sauceOrder = database.productionOrders.find((o) => o.itemId === 'sauce')!;
+  assert.ok(close(sauceOrder.qty, 2000), 'made on schedule, one batch keeps for both dinners');
+
+  // Cooked two days ahead of plan, the batch only keeps until the 3rd —
+  // banking the second dinner's half now would leave it spoiled by the 5th
+  // with the ingredients for a fresh one already eaten.
+  executeOrder(database, dishOrders[0]!.id, { on: '2026-07-01' });
+  assert.equal(sauceOrder.status, 'open', 'the far half of the run still stands');
+  assert.ok(close(sauceOrder.qty, 1000), `got ${sauceOrder.qty}`);
+  assert.ok(close(onHand(database, 'sauce'), 0), 'no doomed surplus on the shelf');
+
+  // The second dinner cooks its half fresh, on its own schedule.
+  const second = executeOrder(database, dishOrders[1]!.id, { on: '2026-07-05' });
+  assert.equal(second.shortages.length, 0);
+  assert.equal(sauceOrder.status, 'received');
+});
+
+test('serving planned meals one by one still cooks the committed batch once', () => {
+  const database = nestedDb();
+  // One sachet per making of the dish, however many dinners share the batch.
+  database.items.push(purchased('sachet2', { stockUom: 'ea' }));
+  database.recipes = database.recipes.map((r) =>
+    r.outputItemId === 'dish'
+      ? { ...r, components: [...r.components, { itemId: 'sachet2', qty: 1, uom: 'ea', scalable: false }] }
+      : r,
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 2 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-05', slot: 'dinner', itemId: 'dish', servings: 2 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+  // Exactly what the merged plan shopped for: one making's sachet.
+  receive(database, 'sachet2', { qty: 1, on: '2026-06-30' });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.ok(!mrp.purchases.some((p) => p.itemId === 'sachet2'), 'one merged making, one sachet planned');
+  commitProduction(database, mrp);
+  const dishOrder = database.productionOrders.find((o) => o.itemId === 'dish')!;
+
+  // Serving Friday's dinner is the committed demand happening: it cooks the
+  // batch the order stands for — whole — banks Sunday's half, and closes
+  // the order. Cooking just Friday's share would make the batch again on
+  // Sunday and consume a second sachet nobody planned to buy.
+  const first = serve(database, 'dish', 2, { on: '2026-07-03' });
+  assert.equal(first.servedPlanEntryId, 'MP-1');
+  assert.equal(dishOrder.status, 'received', 'the making it stood for has happened');
+  assert.ok(close(onHand(database, 'dish'), 750), `got ${onHand(database, 'dish')}`);
+
+  // Sunday opens the fridge: no second making, no second sachet.
+  const second = serve(database, 'dish', 2, { on: '2026-07-05' });
+  assert.equal(second.shortages.length, 0, 'no unplanned shortage');
+  assert.ok(close(onHand(database, 'dish'), 0), 'the banked half is eaten');
+  assert.ok(close(onHand(database, 'sachet2'), 0), 'one making, one sachet');
+});
+
+test('a due meal whose multi-day batch never started cannot be served today', () => {
+  const database = db(
+    [purchased('flour'), made('slowdish')],
+    [
+      recipe('slowdish', 1000, [{ itemId: 'flour', qty: 600, uom: 'g' }], {
+        servings: 2,
+        steps: [{ text: 'long prove', activeMin: 30, passiveMin: 960 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-06', slot: 'dinner', itemId: 'slowdish', servings: 2 });
+  receive(database, 'flour', { qty: 5000, on: '2026-07-01' });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 10 }));
+  const order = database.productionOrders.find((o) => o.itemId === 'slowdish')!;
+  assert.ok(order.startOn < order.dueOn, 'the prove spans days');
+
+  // The prove never happened; dinner time cannot conjure it. Closing the
+  // order and the meal over food that finishes in two days would falsify
+  // both.
+  assert.throws(() => serve(database, 'slowdish', 2, { on: '2026-07-06' }), /multi-day making/);
+  assert.equal(order.status, 'open', 'the commitment still stands');
+  assert.equal(database.mealPlan[0]!.servedOn, undefined, 'the meal is not marked eaten');
+
+  // --force records the serve for a household that cooked off the books.
+  const forced = serve(database, 'slowdish', 2, { on: '2026-07-06', allowShortages: true });
+  assert.equal(forced.servings, 2);
+  assert.equal(order.status, 'received');
+});
+
+test('exactly one serving of stock is one cookable serving', () => {
+  const database = db(
+    [purchased('flour'), made('bun')],
+    [recipe('bun', 600, [{ itemId: 'flour', qty: 600, uom: 'g' }], { servings: 6 })],
+  );
+  // Ingredients for exactly one serving of a six-serving recipe: the
+  // bisection converges to 0.9999… and the >= 1 cutoff dropped the dish.
+  receive(database, 'flour', { qty: 100, on: '2026-07-01' });
+
+  const check = feasibility(database, 'bun', undefined, '2026-07-02', true);
+  assert.equal(check.servings, 1, `got ${check.servings}`);
+  assert.ok(
+    cookableNow(database, 1, '2026-07-02').some((f) => f.itemId === 'bun'),
+    'cook-now offers the serving that exists',
+  );
+});
+
+test('a parent waits for its cascaded multi-day child to finish', () => {
+  const database = db(
+    [purchased('flour'), made('starterloaf'), made('feast')],
+    [
+      recipe('starterloaf', 1000, [{ itemId: 'flour', qty: 600, uom: 'g' }], {
+        servings: 2,
+        steps: [{ text: 'long prove', activeMin: 30, passiveMin: 960 }],
+      }),
+      recipe('feast', 1000, [{ itemId: 'starterloaf', qty: 1000, uom: 'g' }], { servings: 2 }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-06', slot: 'dinner', itemId: 'feast', servings: 2 });
+  receive(database, 'flour', { qty: 5000, on: '2026-07-01' });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 10 }));
+
+  const feastOrder = database.productionOrders.find((o) => o.itemId === 'feast')!;
+  const childOrder = database.productionOrders.find((o) => o.itemId === 'starterloaf')!;
+  assert.equal(childOrder.startOn, '2026-07-04', 'the prove spans days');
+  assert.equal(childOrder.dueOn, '2026-07-06');
+
+  // The child was never made; executing the parent on its own start date
+  // makes it inline — and the feast cannot come out of the oven before the
+  // prove its cascade still owed has happened.
+  const result = executeOrder(database, feastOrder.id, { on: feastOrder.startOn });
+  assert.equal(result.lagDays, 2, `got ${result.lagDays}`);
+  assert.equal(childOrder.status, 'received');
+  const feastLot = database.lots.find((l) => l.itemId === 'feast')!;
+  assert.equal(feastLot.receivedOn, '2026-07-08', 'start plus the prove still owed');
+});
+
+test('a multi-day batch ages from its completion, not its start', () => {
+  const database = db(
+    [purchased('flour'), made('loaf2', { shelfLifeDays: 1 })],
+    [
+      recipe('loaf2', 1500, [{ itemId: 'flour', qty: 1000, uom: 'g' }], {
+        servings: 4,
+        // An overnight prove pushes the start back before the due date.
+        steps: [{ text: 'prove', activeMin: 30, passiveMin: 960 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-04', slot: 'dinner', itemId: 'loaf2', servings: 2 });
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-05', slot: 'dinner', itemId: 'loaf2', servings: 2 });
+  receive(database, 'flour', { qty: 5000, on: '2026-07-01' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const order = database.productionOrders.find((o) => o.itemId === 'loaf2')!;
+  assert.ok(close(order.qty, 1500), 'one merged batch: made for the 4th, it keeps to the 5th');
+  assert.ok(order.startOn < order.dueOn, 'the prove starts it days early');
+
+  // Executed on schedule, the loaf is *finished* on its due date and ages
+  // from there — dating it from the start would have it expire before the
+  // second dinner MRP merged into the batch.
+  executeOrder(database, order.id, { on: order.startOn });
+  const lot = database.lots.find((l) => l.itemId === 'loaf2')!;
+  assert.equal(lot.receivedOn, order.dueOn);
+  assert.equal(lot.expiresOn, '2026-07-05');
+  assert.ok(close(availableOn(database, 'loaf2', '2026-07-05'), 1500), 'still good for the second dinner');
+});
+
+test("serving a meal added later leaves other meals' commitments standing", () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-06', slot: 'dinner', itemId: 'dish', servings: 2 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const dishOrder = database.productionOrders.find((o) => o.itemId === 'dish')!;
+  assert.deepEqual([...(dishOrder.pegging ?? [])], ['MP-1']);
+
+  // A dinner added after the commit, due before it. Serving it matches the
+  // item, but not the meals the order was committed for — eating that
+  // batch now would leave Monday's dinner short, on fixed inputs planned
+  // once.
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-02', slot: 'dinner', itemId: 'dish', servings: 2 });
+  const result = serve(database, 'dish', 2, { on: '2026-07-02' });
+
+  assert.equal(result.servedPlanEntryId, 'MP-2');
+  assert.equal(dishOrder.status, 'open', "Monday's batch is not eaten");
+  assert.ok(close(dishOrder.qty, 750), `got ${dishOrder.qty}`);
+  assert.ok(close(onHand(database, 'dish'), 0), 'the ad-hoc making fed only this meal');
+});
+
+test('a small serve does not cook batches pegged to meals it never reaches', () => {
+  const database = nestedDb();
+  // Committed for Saturday's dinner alone…
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-04', slot: 'dinner', itemId: 'dish', servings: 2 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const dishOrder = database.productionOrders.find((o) => o.itemId === 'dish')!;
+  assert.deepEqual([...(dishOrder.pegging ?? [])], ['MP-1']);
+
+  // …then Thursday's forgotten lunch is logged after the fact. Both are
+  // due by Saturday, and the portions go to the earlier entry — Saturday's
+  // batch is pegged to a meal these portions never reach, and must stay
+  // committed to it rather than be cooked and closed on the lunch's behalf.
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-02', slot: 'lunch', itemId: 'dish', servings: 2 });
+  const result = serve(database, 'dish', 2, { on: '2026-07-04' });
+
+  assert.equal(result.servedPlanEntryId, 'MP-2', 'the earlier entry takes the portions');
+  assert.equal(database.mealPlan.find((e) => e.id === 'MP-1')!.servedOn, undefined);
+  assert.equal(dishOrder.status, 'open', "Saturday's batch still stands");
+  assert.ok(close(dishOrder.qty, 750), `got ${dishOrder.qty}`);
+});
+
+test('a negative order price is rejected before it poisons the lot cost', () => {
+  const database = db([purchased('flour')]);
+  database.purchaseOrders.push({
+    id: 'PO-1', supplierId: 'shop', orderedOn: '2026-07-01', expectedOn: '2026-07-02', status: 'open',
+    lines: [{ itemId: 'flour', packs: 2, unitPrice: -1, packQty: 100, packUom: 'g' }],
+  });
+
+  // A negative price would flow into the lot's unit cost and turn the
+  // pantry valuation — and every meal drawing on the lot — negative.
+  assert.throws(() => receivePurchaseOrder(database, 'PO-1', '2026-07-02'), /invalid price/);
+  assert.equal(database.purchaseOrders[0]!.status, 'open', 'the order awaits a fixed line');
+  assert.equal(database.lots.length, 0, 'nothing booked at a nonsense cost');
+});
+
+test('separately committed policies stay separate makings on one serve', () => {
+  const database = db(
+    [purchased('base9'), purchased('garnish9'), made('plate9')],
+    [
+      recipe('plate9', 1000, [
+        { itemId: 'base9', qty: 1000, uom: 'g' },
+        { itemId: 'garnish9', qty: 100, uom: 'g', optional: true },
+      ], { servings: 2 }),
+    ],
+  );
+  // Two dinners committed separately: Friday plain, Saturday --optional.
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'plate9', servings: 2 });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  database.mealPlan.push({ id: 'MP-2', date: '2026-07-04', slot: 'dinner', itemId: 'plate9', servings: 2 });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7, includeOptional: true }));
+
+  // Exactly what the two plans bought: base for both, garnish for one.
+  receive(database, 'base9', { qty: 2000, on: '2026-07-01' });
+  receive(database, 'garnish9', { qty: 100, on: '2026-07-01' });
+
+  // One serve spanning both meals is two pots with two policies — not one
+  // union pot that cooks the plain batch with garnish nobody bought and
+  // fails short on exactly the planned stock.
+  const result = serve(database, 'plate9', 4, { on: '2026-07-04' });
+  assert.equal(result.shortages.length, 0, JSON.stringify(result.shortages));
+  assert.ok(close(onHand(database, 'garnish9'), 0), 'the optional batch used its garnish');
+  assert.ok(close(onHand(database, 'base9'), 0), 'and both used their base');
+  assert.ok(database.productionOrders.every((o) => o.status === 'received'), 'both commitments met');
+});
+
+test('a plain serve cooks a committed batch with its committed garnish', () => {
+  const database = db(
+    [purchased('polentabase'), purchased('shavings2'), made('bowl')],
+    [
+      recipe('bowl', 1000, [
+        { itemId: 'polentabase', qty: 1000, uom: 'g' },
+        { itemId: 'shavings2', qty: 50, uom: 'g', optional: true },
+      ], { servings: 2 }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'bowl', servings: 2 });
+  receive(database, 'polentabase', { qty: 1000, on: '2026-07-01' });
+  receive(database, 'shavings2', { qty: 50, on: '2026-07-01' });
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7, includeOptional: true }));
+
+  // No flag on the serve: the batch is cooked as it was committed — with
+  // the garnish that was planned and bought — exactly as receive PRD-1
+  // would cook it. The order must not be marked received as an optional
+  // batch while the pan got the plain one.
+  serve(database, 'bowl', 2, { on: '2026-07-03' });
+  assert.ok(close(onHand(database, 'shavings2'), 0), 'the committed garnish went into the pan');
+  assert.equal(database.productionOrders[0]!.status, 'received');
+});
+
+test('a stocked sub-recipe under a phantom is banked and issued, not lost', () => {
+  const database = db(
+    [purchased('chili'), made('paste'), phantom('blend'), made('dish')],
+    [
+      recipe('paste', 100, [{ itemId: 'chili', qty: 100, uom: 'g' }]),
+      recipe('blend', 100, [{ itemId: 'paste', qty: 100, uom: 'g' }]),
+      recipe('dish', 1000, [{ itemId: 'blend', qty: 100, uom: 'g' }]),
+    ],
+  );
+  receive(database, 'chili', { qty: 500, on: '2026-07-01' });
+
+  // The phantom's own output is consumed where it stands — but the stocked
+  // paste under it must still be booked in before it is issued back out.
+  // Inheriting the phantom's consume-immediately flag stranded it nowhere,
+  // and the cook failed claiming a shortage of the paste it had just made.
+  const result = produce(database, 'dish', 1000, { on: '2026-07-02' });
+
+  assert.equal(result.shortages.length, 0, 'nothing was short');
+  assert.ok(close(onHand(database, 'chili'), 400), 'the paste took its chili');
+  assert.ok(close(onHand(database, 'paste'), 0), 'made, issued into the phantom, nothing stranded');
+  assert.ok(close(onHand(database, 'dish'), 1000), 'and the dish landed in stock');
+});
+
+test('an ad-hoc cook leaves committed orders for other meals standing', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 2000, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 2000, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const sauceOrder = database.productionOrders.find((o) => o.itemId === 'sauce')!;
+  const committedQty = sauceOrder.qty;
+
+  // Guests tonight: an extra dish with nothing to do with Friday's plan. The
+  // cascade cooks sauce for *this* dish and issues it straight into it —
+  // Friday's committed sauce has still not been made, so its order must
+  // survive at full strength or MRP and prep will quietly drop a batch that
+  // is still owed.
+  produce(database, 'dish', 1000, { on: '2026-07-01' });
+
+  assert.equal(sauceOrder.status, 'open', 'the commitment still stands');
+  assert.equal(sauceOrder.qty, committedQty, 'at its full quantity');
+});
+
+test('cooking a recipe with a deleted component is refused, not quietly abridged', () => {
+  const database = nestedDb();
+  database.items = database.items.filter((item) => item.id !== 'cheese');
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+
+  // Not a shortage — the item does not exist. Cooking around the hole would
+  // book a full dish that never contained its cheese.
+  assert.throws(() => produce(database, 'dish', 1500, { on: '2026-07-01' }), /unknown item "cheese"/);
+  assert.equal(onHand(database, 'butter'), 500, 'the sauce it had already made was rolled back');
+});
+
+test('a recipe cycle fails cleanly when cooking, not with a stack overflow', () => {
+  const database = db(
+    [made('a'), made('b')],
+    [
+      recipe('a', 100, [{ itemId: 'b', qty: 50, uom: 'g' }]),
+      recipe('b', 100, [{ itemId: 'a', qty: 50, uom: 'g' }]),
+    ],
+  );
+  // With nothing in stock the cascade chases the loop; it must be named,
+  // not left to exhaust the call stack.
+  assert.throws(() => produce(database, 'a', 100, { on: '2026-07-01' }), CycleError);
+});
+
+test('a receipt line with no pack terms anywhere is refused, keeping the order open', () => {
+  const database = nestedDb();
+  // A legacy order saved before lines carried their own pack terms…
+  database.purchaseOrders.push({
+    id: 'PO-0001',
+    supplierId: 'shop',
+    orderedOn: '2026-07-01',
+    expectedOn: '2026-07-01',
+    status: 'open',
+    lines: [{ itemId: 'butter', packs: 2, unitPrice: 1 }],
+  });
+  // …whose item has since lost its purchase terms to a hand edit.
+  database.items = database.items.map((item) => {
+    if (item.id !== 'butter') return item;
+    const { purchase: _purchase, ...rest } = item;
+    return rest;
+  });
+
+  assert.throws(() => receivePurchaseOrder(database, 'PO-0001', '2026-07-02'), MiseError);
+  assert.equal(database.purchaseOrders[0]!.status, 'open', 'repairable, not silently emptied');
+  assert.equal(database.lots.length, 0, 'nothing was booked in');
+});
+
+test('feasibility times the servings it offers, not the probe', () => {
+  const database = db(
+    [purchased('oats'), made('porridge')],
+    [
+      recipe('porridge', 100, [{ itemId: 'oats', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'stir', activeMin: 10 }],
+      }),
+    ],
+  );
+  receive(database, 'oats', { qty: 400, on: '2026-07-01' });
+
+  const result = feasibility(database, 'porridge', 1, '2026-07-02', true);
+  assert.ok(Math.abs(result.servings - 4) < 0.01, `got ${result.servings}`);
+  // Four batches on offer means four rounds of stirring — not the probe's one.
+  assert.ok(Math.abs(result.criticalPathMin - 40) < 0.5, `got ${result.criticalPathMin}`);
+});
+
+test('a cancelled production order cannot be executed', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  const order = raiseProductionOrder(database, 'sauce', 1000, '2026-07-03');
+  order.status = 'cancelled';
+
+  assert.throws(() => executeOrder(database, order.id), /cancelled/);
+  assert.equal(onHand(database, 'butter'), 500, 'nothing was cooked');
+});
+
+test('feasibility keeps counting past the old search ceiling', () => {
+  const database = db(
+    [purchased('oats'), made('porridge')],
+    [recipe('porridge', 100, [{ itemId: 'oats', qty: 1, uom: 'g' }])],
+  );
+  receive(database, 'oats', { qty: 100_000, on: '2026-07-01' });
+
+  // 1 g per serving and 100 kg in the house: the answer is 100 000, not the
+  // 512 the old eight-doubling search bound topped out at.
+  const result = feasibility(database, 'porridge', undefined, '2026-07-02');
+  assert.ok(Math.abs(result.servings - 100_000) < 1, `got ${result.servings}`);
+});
+
+test('committed batches stay on the prep schedule', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'dish', servings: 4 });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+
+  // The next run rightly treats the committed batches as supply…
+  const second = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.equal(second.production.length, 0);
+
+  // …but they still have to be cooked, and in the right order.
+  const tasks = prepSchedule(database, second).flatMap((day) => day.tasks);
+  const position = (id: string) => tasks.findIndex((task) => task.itemId === id);
+
+  assert.ok(position('dish') >= 0, 'the committed dish is on the schedule');
+  assert.ok(position('sauce') >= 0, 'its committed sub-recipe too');
+  assert.ok(position('sauce') < position('dish'), 'deepest-first still holds');
+  const dish = tasks[position('dish')]!;
+  assert.ok(close(dish.qty, 1500), `got ${dish.qty}`);
+});
+
+test('optional phantom work counts when the plan includes it', () => {
+  const database = db(
+    [purchased('fruit'), phantom('syrup'), made('cake')],
+    [
+      recipe('syrup', 100, [{ itemId: 'fruit', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'reduce to a syrup', activeMin: 30 }],
+      }),
+      recipe('cake', 500, [
+        { itemId: 'fruit', qty: 300, uom: 'g' },
+        { itemId: 'syrup', qty: 100, uom: 'g', optional: true },
+      ], { steps: [{ text: 'bake', activeMin: 20 }] }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'cake', servings: 1 });
+
+  const plain = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  assert.equal(plain.production[0]!.minutes, 20, 'without the flag the syrup stays out');
+
+  // With the flag the plan buys the syrup's fruit — so it must also
+  // schedule the syrup's making and show its step.
+  const rich = runMrp(database, { asOf: '2026-07-01', horizonDays: 7, includeOptional: true });
+  assert.equal(rich.production[0]!.minutes, 50);
+  const task = prepSchedule(database, rich)
+    .flatMap((day) => day.tasks)
+    .find((t) => t.itemId === 'cake')!;
+  assert.ok(task.steps.some((s) => s.includes('reduce to a syrup')));
+});
+
+test('a prep task lists the phantom steps it implies, in making order', () => {
+  const database = db(
+    [purchased('flour'), phantom('dough'), made('sheets')],
+    [
+      recipe('dough', 500, [{ itemId: 'flour', qty: 300, uom: 'g' }], {
+        steps: [
+          { text: 'knead', activeMin: 10 },
+          { text: 'rest', passiveMin: 30 },
+        ],
+      }),
+      recipe('sheets', 500, [{ itemId: 'dough', qty: 500, uom: 'g' }], {
+        steps: [{ text: 'roll', activeMin: 25 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-03', slot: 'dinner', itemId: 'sheets', servings: 1 });
+
+  const result = runMrp(database, { asOf: '2026-07-01', horizonDays: 7 });
+  const task = prepSchedule(database, result)
+    .flatMap((day) => day.tasks)
+    .find((t) => t.itemId === 'sheets')!;
+
+  // The dough is made first, on this task's clock — its steps lead.
+  assert.deepEqual(task.steps, ['dough: knead', 'dough: rest', 'roll']);
+  assert.equal(task.activeMin, 35);
+  assert.equal(task.passiveMin, 30);
+});
+
+test('an overdue open order lands on today, not off the schedule', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-01', slot: 'dinner', itemId: 'dish', servings: 4 });
+  commitProduction(database, runMrp(database, { asOf: '2026-06-30', horizonDays: 7 }));
+
+  // Two days later the meal date has passed and the orders are still open:
+  // late, not gone. MRP counts their output as supply, so prep must still
+  // show the cooking that supply depends on.
+  const later = runMrp(database, { asOf: '2026-07-03', horizonDays: 7 });
+  const days = prepSchedule(database, later);
+
+  assert.ok(days.length > 0, 'the overdue batch is still somebody\'s job');
+  assert.equal(days[0]!.date, '2026-07-03', 'scheduled for today — it cannot be cooked in the past');
+  assert.ok(days[0]!.tasks.some((task) => task.itemId === 'dish'));
+});
+
+test('executing a parent early still settles its future-start child orders', () => {
+  const database = nestedDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-05', slot: 'dinner', itemId: 'dish', servings: 4 });
+  receive(database, 'butter', { qty: 500, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, on: '2026-06-30' });
+  receive(database, 'cheese', { qty: 500, on: '2026-06-30' });
+
+  commitProduction(database, runMrp(database, { asOf: '2026-07-01', horizonDays: 7 }));
+  const orderFor = (id: string) => database.productionOrders.find((o) => o.itemId === id)!;
+  assert.equal(orderFor('sauce').startOn, '2026-07-05');
+
+  // Cooking three days ahead of plan cooks the sauce ahead of plan too. Its
+  // order's window has not opened, but the work it stands for is done —
+  // and the output went straight into the dish, so nothing ages on a shelf.
+  executeOrder(database, orderFor('dish').id, { on: '2026-07-02' });
+
+  assert.equal(orderFor('sauce').status, 'received');
+  assert.equal(orderFor('crust').status, 'received');
+});
+
+test('feasibility ignores stock that has gone off', () => {
+  const database = nestedDb();
+  receive(database, 'sauce', { qty: 1000, on: '2026-07-01', expiresOn: '2026-07-05' });
+  receive(database, 'crust', { qty: 300, on: '2026-07-01' });
+  receive(database, 'cheese', { qty: 200, on: '2026-07-01' });
+
+  assert.ok(close(feasibility(database, 'dish', 4, '2026-07-03').servings, 4, 1e-3));
+  // A week later the sauce is off and there is nothing to make more from.
+  assert.ok(feasibility(database, 'dish', 4, '2026-07-10').servings < 0.01);
+});
+
+// ---------------------------------------------------------------------------
+// Failure handling
+// ---------------------------------------------------------------------------
+
+test('a shortage below a phantom is refused, exactly as one above it would be', () => {
+  const database = nestedDb();
+  // Sauce reaches butter and flour through the roux, which is a phantom.
+  // Passing through a phantom must not quietly relax the shortage policy.
+  assert.throws(() => produce(database, 'sauce', 1000, { on: '2026-07-01' }), ShortageError);
+  assert.equal(onHand(database, 'sauce'), 0, 'nothing was booked in');
+});
+
+test('a failed production leaves the pantry exactly as it found it', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 500, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, unitCost: 0.01, on: '2026-06-30' });
+  // No cheese, so the dish fails — but only after butter and flour have been
+  // issued to the sauce and the crust.
+  const ledgerBefore = database.ledger.length;
+
+  assert.throws(() => produce(database, 'dish', 1500, { on: '2026-07-01' }), ShortageError);
+
+  assert.equal(onHand(database, 'butter'), 500, 'the butter is back');
+  assert.equal(onHand(database, 'flour'), 500);
+  assert.equal(onHand(database, 'sauce'), 0, 'and the half-made sauce is gone');
+  assert.equal(database.ledger.length, ledgerBefore, 'the ledger records nothing that did not happen');
+});
+
+test('shortages are still reported rather than thrown when asked for', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 10 });
+
+  const result = produce(database, 'sauce', 1000, { on: '2026-07-01', allowShortages: true });
+  assert.ok(result.shortages.length > 0);
+  assert.equal(onHand(database, 'sauce'), 1000, 'the cook pressed on regardless');
+});
+
+test('a failed serve leaves the pantry exactly as it found it', () => {
+  const database = nestedDb();
+  receive(database, 'butter', { qty: 500, unitCost: 0.01, on: '2026-06-30' });
+  receive(database, 'flour', { qty: 500, unitCost: 0.01, on: '2026-06-30' });
+  // No cheese, so cooking the dish to serve it fails part-way through.
+  const ledgerBefore = database.ledger.length;
+
+  assert.throws(() => serve(database, 'dish', 4, { on: '2026-07-01' }), ShortageError);
+
+  assert.equal(onHand(database, 'butter'), 500, 'cook-and-serve rolls back as one unit');
+  assert.equal(onHand(database, 'flour'), 500);
+  assert.equal(onHand(database, 'sauce'), 0);
+  assert.equal(database.ledger.length, ledgerBefore);
+});
+
+test('a purchase order arrives on the lead time the plan was made with', () => {
+  const database = nestedDb();
+  // The supplier is slow by default, but this item can be had the same day.
+  database.suppliers = [{ id: 'shop', name: 'Shop', leadTimeDays: 3 }];
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-05', slot: 'dinner', itemId: 'cheese', servings: 200 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 14 });
+  const planned = mrp.purchases.find((line) => line.itemId === 'cheese')!;
+  const [order] = raisePurchaseOrders(database, shoppingList(database, mrp), '2026-07-01');
+
+  assert.ok(order);
+  assert.equal(planned.late, false, 'the item itself has no lead time');
+  assert.ok(
+    order.expectedOn <= planned.neededOn,
+    `committed arrival ${order.expectedOn} must not fall after ${planned.neededOn}`,
+  );
+});
+
+test('feasibility ignores stock that has not arrived yet', () => {
+  const database = nestedDb();
+  receive(database, 'sauce', { qty: 1000, on: '2026-07-10' });
+  receive(database, 'crust', { qty: 300, on: '2026-07-10' });
+  receive(database, 'cheese', { qty: 200, on: '2026-07-10' });
+
+  assert.equal(feasibility(database, 'dish', 4, '2026-07-01').servings, 0, 'none of it is here yet');
+  assert.ok(close(feasibility(database, 'dish', 4, '2026-07-10').servings, 4, 1e-3));
+});
+
+test('a multi-batch run is scheduled for the work it actually is', () => {
+  const database = db(
+    [purchased('flour', {
+      purchase: { supplierId: 'shop', packQty: 1000, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+    }), made('loaf')],
+    [
+      recipe('loaf', 100, [{ itemId: 'flour', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'work', activeMin: 60 }, { text: 'rest', passiveMin: 240 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-20', slot: 'dinner', itemId: 'loaf', servings: 20 });
+
+  const mrp = runMrp(database, { asOf: '2026-07-01', horizonDays: 30 });
+  const run = mrp.production.find((order) => order.itemId === 'loaf')!;
+
+  // Twenty batches: hands-on time multiplies, the rest happens in parallel.
+  assert.ok(close(run.activeMin, 20 * 60), `got ${run.activeMin}`);
+  assert.ok(close(run.passiveMin, 240), 'twenty loaves rest in the same four hours');
+  assert.ok(close(run.minutes, 1440));
+  // 1440 minutes is three eight-hour days, so it cannot start on the due date.
+  assert.equal(run.startOn, '2026-07-18');
+
+  const day = prepSchedule(database, mrp).find((entry) => entry.date === '2026-07-18')!;
+  assert.ok(close(day.activeMin, 1200), 'the prep sheet shows the real workload');
+});
+
+test('a single-batch run is unchanged', () => {
+  const database = db(
+    [purchased('flour', {
+      purchase: { supplierId: 'shop', packQty: 1000, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+    }), made('loaf')],
+    [
+      recipe('loaf', 100, [{ itemId: 'flour', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'work', activeMin: 60 }, { text: 'rest', passiveMin: 240 }],
+      }),
+    ],
+  );
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-20', slot: 'dinner', itemId: 'loaf', servings: 1 });
+
+  const run = runMrp(database, { asOf: '2026-07-01', horizonDays: 30 }).production.find(
+    (order) => order.itemId === 'loaf',
+  )!;
+
+  assert.ok(close(run.activeMin, 60));
+  assert.ok(close(run.minutes, 300));
+  assert.equal(run.startOn, '2026-07-20', 'five hours fits in the day it is due');
+});
+
+// ---------------------------------------------------------------------------
+// Cooking is not the same question as eating
+// ---------------------------------------------------------------------------
+
+function loafDb() {
+  const database = db(
+    [
+      purchased('flour', {
+        purchase: { supplierId: 'shop', packQty: 1000, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+      }),
+      made('loaf'),
+    ],
+    [
+      recipe('loaf', 100, [{ itemId: 'flour', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'work', activeMin: 30 }, { text: 'rest', passiveMin: 60 }],
+      }),
+    ],
+  );
+  return database;
+}
+
+test('a finished dish in the tin does not make it cookable', () => {
+  const database = loafDb();
+  // Four loaves baked, not a gram of flour left.
+  receive(database, 'loaf', { qty: 400, on: '2026-07-01' });
+
+  assert.deepEqual(
+    cookableNow(database, 1, '2026-07-02'),
+    [],
+    'you cannot cook a loaf out of a loaf',
+  );
+  // The dish is still there to be eaten — that is a different question.
+  assert.equal(onHand(database, 'loaf'), 400);
+});
+
+test('ingredients in the house do make it cookable', () => {
+  const database = loafDb();
+  receive(database, 'flour', { qty: 400, on: '2026-07-01' });
+
+  const options = cookableNow(database, 1, '2026-07-02');
+  assert.equal(options.length, 1);
+  assert.ok(close(options[0]!.servings, 4, 1e-3));
+});
+
+test('cooking without forcing refuses when the ingredients are gone', () => {
+  const database = loafDb();
+  receive(database, 'loaf', { qty: 400, on: '2026-07-01' });
+
+  // This is what the web Cook button now does.
+  assert.throws(() => produce(database, 'loaf', 100, { on: '2026-07-02' }), ShortageError);
+  assert.equal(onHand(database, 'loaf'), 400, 'no lot conjured out of nothing');
+});
+
+test('cooking reports the duration of the run, not of one batch', () => {
+  const database = loafDb();
+  receive(database, 'flour', { qty: 5000, on: '2026-07-01' });
+
+  const result = produce(database, 'loaf', 500, { on: '2026-07-02' });
+  // Five batches: 5 x 30 minutes hands-on, plus one 60-minute rest.
+  assert.ok(close(result.minutes, 210), `got ${result.minutes}`);
+});
+
+test('planning and cooking agree about how long the same job takes', () => {
+  // The two used to compute this separately and drift apart.
+  const database = loafDb();
+  database.mealPlan.push({ id: 'MP-1', date: '2026-07-20', slot: 'dinner', itemId: 'loaf', servings: 5 });
+  const planned = runMrp(database, { asOf: '2026-07-01', horizonDays: 30 }).production.find(
+    (order) => order.itemId === 'loaf',
+  )!;
+
+  receive(database, 'flour', { qty: 5000, on: '2026-07-01' });
+  const actual = produce(database, 'loaf', planned.qty, { on: '2026-07-02' });
+
+  assert.ok(close(actual.minutes, planned.minutes), `${actual.minutes} vs ${planned.minutes}`);
+});
+
+test('a run of nothing is refused before it can touch the pantry', () => {
+  const database = loafDb();
+  // A fixed component is what makes this dangerous: a zero-sized batch would
+  // still issue the pinch that does not scale.
+  database.recipes = database.recipes.map((entry) =>
+    entry.outputItemId === 'loaf'
+      ? { ...entry, components: [...entry.components, { itemId: 'salt', qty: 5, uom: 'g' as const, scalable: false }] }
+      : entry,
+  );
+  database.items = [...database.items, purchased('salt')];
+  receive(database, 'flour', { qty: 1000, on: '2026-07-01' });
+  receive(database, 'salt', { qty: 100, on: '2026-07-01' });
+  const ledgerBefore = database.ledger.length;
+
+  assert.throws(() => produce(database, 'loaf', 0, { on: '2026-07-02' }), MiseError);
+  assert.throws(() => produce(database, 'loaf', -100, { on: '2026-07-02' }), MiseError);
+  assert.throws(() => serve(database, 'loaf', 0, { on: '2026-07-02' }), MiseError);
+
+  assert.equal(onHand(database, 'salt'), 100, 'the fixed pinch stayed in the jar');
+  assert.equal(database.ledger.length, ledgerBefore, 'and nothing was posted');
+  assert.equal(onHand(database, 'loaf'), 0, 'no zero-quantity lot');
+});
+
+// ---------------------------------------------------------------------------
+// Time reflects the work that actually remains
+// ---------------------------------------------------------------------------
+
+/** A dish that is ten minutes of assembly around a two-hour sauce. */
+function slowSauceDb() {
+  return db(
+    [
+      purchased('tomato', {
+        purchase: { supplierId: 'shop', packQty: 1000, packUom: 'g', packPrice: 1, leadTimeDays: 0 },
+      }),
+      made('sauce'),
+      made('plate'),
+    ],
+    [
+      recipe('sauce', 100, [{ itemId: 'tomato', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'simmer', passiveMin: 120 }],
+      }),
+      recipe('plate', 100, [{ itemId: 'sauce', qty: 100, uom: 'g' }], {
+        steps: [{ text: 'assemble', activeMin: 10 }],
+      }),
+    ],
+  );
+}
+
+test('a sub-recipe already made costs no time', () => {
+  const database = slowSauceDb();
+  receive(database, 'sauce', { qty: 100, on: '2026-07-01' });
+
+  const check = feasibility(database, 'plate', 1, '2026-07-02');
+  assert.ok(close(check.servings, 1, 1e-3));
+  assert.ok(close(check.criticalPathMin, 10), `only the assembly remains, got ${check.criticalPathMin}`);
+});
+
+test('a sub-recipe still to be made costs its time', () => {
+  const database = slowSauceDb();
+  // Exactly one serving's worth, so the servings offered equal the probe and
+  // the time is the probe's: the sauce's simmer plus the plate's assembly.
+  receive(database, 'tomato', { qty: 100, on: '2026-07-01' });
+
+  const check = feasibility(database, 'plate', 1, '2026-07-02');
+  assert.ok(close(check.criticalPathMin, 130), `got ${check.criticalPathMin}`);
+});
+
+test('cooking counts the time of everything it cooked on the way', () => {
+  const database = slowSauceDb();
+  receive(database, 'tomato', { qty: 1000, on: '2026-07-01' });
+
+  const result = produce(database, 'plate', 100, { on: '2026-07-02' });
+  assert.ok(result.consumed.some((line) => line.itemId === 'sauce' && line.madeToOrder));
+  assert.ok(close(result.minutes, 130), `the sauce was simmered by this call too, got ${result.minutes}`);
+});
+
+test('cooking with the sub-recipe on hand reports only its own time', () => {
+  const database = slowSauceDb();
+  receive(database, 'sauce', { qty: 100, on: '2026-07-01' });
+
+  const result = produce(database, 'plate', 100, { on: '2026-07-02' });
+  assert.ok(close(result.minutes, 10), `got ${result.minutes}`);
+});

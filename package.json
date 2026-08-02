@@ -1,0 +1,24 @@
+{
+  "name": "mise",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A recursive recipe engine and home ERP: multi-level BOM explosion for cooking, with pantry inventory, MRP, procurement and prep scheduling.",
+  "bin": {
+    "mise": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"dist/tests/*.test.js\"",
+    "mise": "node dist/src/cli.js",
+    "web": "node scripts/serve.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

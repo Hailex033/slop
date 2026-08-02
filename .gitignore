@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Local pantry database written by the CLI (`mise` persists here by default).
+mise.db.json

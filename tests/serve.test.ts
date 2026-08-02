@@ -1,0 +1,136 @@
+/**
+ * The dev server, exercised as a process.
+ *
+ * These assertions only mean anything end-to-end: the defect they guard
+ * against was an uncaught exception in the request handler, which does not
+ * fail a function call — it takes the whole process down.
+ */
+
+import assert from 'node:assert/strict';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { connect } from 'node:net';
+import { join } from 'node:path';
+import { after, before, test } from 'node:test';
+
+const ROOT = join(import.meta.dirname, '..', '..');
+const PORT = 4100 + Math.floor(Math.random() * 800);
+const BASE = `http://127.0.0.1:${PORT}`;
+
+let server: ChildProcess;
+
+before(async () => {
+  server = spawn('node', [join(ROOT, 'scripts', 'serve.mjs')], {
+    env: { ...process.env, PORT: String(PORT) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  // Wait for the listening line rather than sleeping a fixed amount.
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('server did not start in time')), 10_000);
+    server.stdout?.on('data', (chunk: Buffer) => {
+      if (chunk.toString().includes('running at')) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    server.once('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`server exited during startup with code ${code}`));
+    });
+  });
+});
+
+after(() => {
+  server?.kill();
+});
+
+test('serves the page', async () => {
+  const response = await fetch(`${BASE}/`);
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /<title>Mise/);
+});
+
+test('serves the compiled engine the page imports', async () => {
+  assert.equal((await fetch(`${BASE}/dist/src/engine/explode.js`)).status, 200);
+});
+
+test('a malformed URL escape is a 400, not the end of the server', async () => {
+  // `decodeURIComponent('%ZZ')` throws; before this was caught, one such
+  // request killed the process and every other client with it.
+  for (const path of ['/%ZZ', '/%E0%A4%A', '/web/%']) {
+    const response = await fetch(`${BASE}${path}`);
+    assert.equal(response.status, 400, `${path} should be rejected, not fatal`);
+  }
+
+  // The point of the test: it is still answering afterwards.
+  assert.equal((await fetch(`${BASE}/`)).status, 200);
+  assert.equal(server.exitCode, null, 'the server process is still alive');
+});
+
+test('paths outside the repository are refused', async () => {
+  for (const path of ['/../../etc/passwd', '/%2e%2e/%2e%2e/etc/passwd']) {
+    const response = await fetch(`${BASE}${path}`);
+    assert.equal(response.status, 404, `${path} must not escape the root`);
+  }
+});
+
+test('only the public asset trees are served, not the whole repository', async () => {
+  // Every one of these exists on disk under the root; that is exactly why
+  // they must be refused — the root also holds the CLI database, the git
+  // history, and the source.
+  for (const path of [
+    '/package.json',
+    '/README.md',
+    '/.git/config',
+    '/scripts/serve.mjs',
+    // fetch() would collapse a literal `..` before sending; the encoded form
+    // reaches the server intact, which is the case the allowlist must catch.
+    '/web/%2e%2e/package.json',
+  ]) {
+    const response = await fetch(`${BASE}${path}`);
+    assert.equal(response.status, 404, `${path} must not be downloadable`);
+  }
+
+  // And the page still works: both public trees answer.
+  assert.equal((await fetch(`${BASE}/web/styles.css`)).status, 200);
+  assert.equal((await fetch(`${BASE}/dist/web/app.js`)).status, 200);
+});
+
+test('an unknown path is a 404 and the server carries on', async () => {
+  assert.equal((await fetch(`${BASE}/nope/missing.js`)).status, 404);
+  assert.equal((await fetch(`${BASE}/`)).status, 200);
+});
+
+/** First response line for a hand-written request — fetch() refuses to send these. */
+function rawRequest(payload: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(PORT, '127.0.0.1', () => {
+      socket.write(payload);
+    });
+    let data = '';
+    socket.on('data', (chunk: Buffer) => {
+      data += chunk.toString();
+    });
+    socket.on('end', () => resolve(data.split('\r\n')[0] ?? ''));
+    socket.on('error', reject);
+    setTimeout(() => {
+      socket.destroy();
+      resolve(data.split('\r\n')[0] ?? '');
+    }, 3000).unref();
+  });
+}
+
+test('a hostile Host header cannot take the server down', async () => {
+  // Building the URL on `headers.host` used to throw outside every guard —
+  // one `Host: [` and the process was gone. The path is all that matters, so
+  // the header now plays no part at all.
+  const status = await rawRequest('GET / HTTP/1.1\r\nHost: [\r\nConnection: close\r\n\r\n');
+  assert.match(status, / 200 /, `got "${status}"`);
+
+  // An absolute-form target that cannot parse is that client's 400.
+  const absolute = await rawRequest('GET http://[ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n');
+  assert.match(absolute, / 400 /, `got "${absolute}"`);
+
+  assert.equal((await fetch(`${BASE}/`)).status, 200, 'still answering afterwards');
+  assert.equal(server.exitCode, null, 'the server process is still alive');
+});
